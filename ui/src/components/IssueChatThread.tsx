@@ -226,6 +226,8 @@ const IssueChatCtx = createContext<IssueChatMessageContext>({
   successfulRunHandoff: null,
 });
 
+const AGENT_COMMENT_BUBBLE_WIDTH_CLASS = "max-w-[calc(100%-0.5rem)] sm:max-w-[85%]";
+
 export type IssueChatRunFinalizationAction = {
   id: "cancel" | "done";
   label: string;
@@ -1756,7 +1758,8 @@ function IssueChatAssistantMessage({
           {/* Canonical conference-room agent bubble (BoardChat.tsx:712). */}
           <div
             className={cn(
-              "min-w-0 max-w-[85%] break-words px-3 py-2 text-sm overflow-x-auto overflow-y-visible [border-radius:14px_14px_14px_4px]",
+              "min-w-0 break-words px-3 py-2 text-sm overflow-x-auto overflow-y-visible [border-radius:14px_14px_14px_4px]",
+              AGENT_COMMENT_BUBBLE_WIDTH_CLASS,
               deleted
                 ? "border border-border bg-muted/50 text-muted-foreground"
                 : "border border-border bg-card text-foreground",
