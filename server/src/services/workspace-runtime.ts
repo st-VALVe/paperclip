@@ -846,6 +846,10 @@ async function directoryExists(value: string) {
   return fs.stat(value).then((stats) => stats.isDirectory()).catch(() => false);
 }
 
+async function directoryIsEmpty(value: string) {
+  return fs.readdir(value).then((entries) => entries.length === 0).catch(() => false);
+}
+
 async function listLinkedGitWorktreePaths(repoRoot: string): Promise<Set<string>> {
   const output = await runGit(["worktree", "list", "--porcelain"], repoRoot);
   const paths = new Set<string>();
@@ -1732,7 +1736,11 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
             failureLabel: `git worktree remove ${workspacePath}`,
           });
         } catch (err) {
-          warnings.push(err instanceof Error ? err.message : String(err));
+          if (createdByRuntime && await directoryIsEmpty(workspacePath)) {
+            await fs.rm(workspacePath, { recursive: true, force: true });
+          } else {
+            warnings.push(err instanceof Error ? err.message : String(err));
+          }
         }
       }
     }
@@ -1756,7 +1764,9 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          warnings.push(`Skipped deleting branch "${input.workspace.branchName}": ${message}`);
+          if (!message.toLowerCase().includes("not found")) {
+            warnings.push(`Skipped deleting branch "${input.workspace.branchName}": ${message}`);
+          }
         }
       }
     }
