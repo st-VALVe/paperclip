@@ -91,6 +91,38 @@ describe("0111 project issue_prefix migration", () => {
   });
 });
 
+describe("0111 migration persists the PaperBridge-specific issue_prefix value", () => {
+  const sql = readSource(migrationPath);
+  // The persisted data update is the statement that writes a value into
+  // issue_prefix (distinct from the ALTER that only adds the column).
+  const dataStatement =
+    sql
+      .split(";")
+      .map((part) => part.trim())
+      .find(
+        (part) =>
+          /\bupdate\b/i.test(part) &&
+          /\bprojects\b/i.test(part) &&
+          /issue_prefix/i.test(part),
+      ) ?? "";
+  const persistedPrefix =
+    dataStatement.match(/set\s+["']?issue_prefix["']?\s*=\s*'([^']*)'/i)?.[1] ?? "";
+
+  it("includes a data statement that persists issue_prefix on the projects table", () => {
+    expect(existsSync(migrationPath)).toBe(true);
+    expect(dataStatement).not.toBe("");
+  });
+
+  it("sets issue_prefix to a non-empty PaperBridge-specific value that is not the company AIM prefix", () => {
+    expect(persistedPrefix.trim()).not.toBe("");
+    expect(persistedPrefix.trim().toUpperCase()).not.toBe("AIM");
+  });
+
+  it("scopes the persisted prefix to a specific project rather than every project", () => {
+    expect(dataStatement).toMatch(/\bwhere\b/i);
+  });
+});
+
 describe("issue creation derives the identifier prefix via resolveIssuePrefix", () => {
   const source = readSource(issuesServicePath);
 
