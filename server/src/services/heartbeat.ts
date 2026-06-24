@@ -8982,21 +8982,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const racedCandidate = sharedWorkspaceDedupIdentity && existingExecutionWorkspace === null
           ? await executionWorkspacesSvc.findReusableSharedWorkspace(sharedWorkspaceDedupIdentity)
           : null;
-        // Reuse the raced row ONLY if its persisted environment does not conflict
-        // with this assignee's intended env — the SAME PAPA-380/431 guard an early
-        // candidate gets (resolveExecutionWorkspaceEnvironmentId), combined via
-        // resolveSharedWorkspaceReuseDecision. A conflict (or no row) -> create fresh.
+        // Reuse the raced shared row when one is found for this logical identity.
+        // Upstream (origin/master) replaced resolveExecutionWorkspaceEnvironmentId's
+        // conflict detection with a pure per-run environment precedence resolver
+        // (agent > instance > local, applied above as selectedEnvironmentId) and
+        // dropped the env-conflict gate from the existing-workspace reuse path. The
+        // reused row no longer pins an environment, so the old PAPA-380/431 mismatch
+        // cannot occur here; mirror the early-reuse path and reuse the deduped
+        // candidate directly. A missing row -> create fresh.
         const racedSharedWorkspace = resolveSharedWorkspaceReuseDecision({
           candidate: racedCandidate,
-          environmentConflict: racedCandidate
-            ? resolveExecutionWorkspaceEnvironmentId({
-                projectPolicy: projectExecutionWorkspacePolicy,
-                issueSettings: issueExecutionWorkspaceSettings,
-                workspaceConfig: racedCandidate.config ?? null,
-                agentDefaultEnvironmentId: agent.defaultEnvironmentId,
-                defaultEnvironmentId: defaultEnvironment.id,
-              }).conflict
-            : null,
+          environmentConflict: null,
         })
           ? racedCandidate
           : null;
