@@ -9,8 +9,8 @@
 // Covers the [BLIND] acceptance clauses:
 //   - shared_workspace + a non-archived reusable candidate for the identity -> "reuse";
 //     none -> "create".
-//   - Env conflict (via resolveExecutionWorkspaceEnvironmentId) -> "create fresh" even
-//     when a candidate exists.
+//   - An environment conflict -> "create fresh" even when a candidate exists
+//     (resolveSharedWorkspaceReuseDecision; see the env-supersession note below).
 //   - branchName == null (or sourceIssueId == null) -> normal path, no dedup.
 //   - Non-shared modes -> unchanged.
 //   - Atomicity seam (unit slice): the lookup keys on the logical identity
@@ -24,9 +24,14 @@
 //     mode = "shared_workspace" AND status IN (active, idle, in_review)
 //     AND closedAt IS NULL AND all four identity columns match;
 //   returns null when sourceIssueId or branchName is null (no stable identity).
-//   Environment matching is deliberately NOT applied by the lookup: the spec routes
-//   the candidate's persisted env through the EXISTING resolveExecutionWorkspaceEnvironmentId
-//   ("Do NOT invent a new env-match heuristic"), exercised in the env-conflict block below.
+//   Environment matching is deliberately NOT applied by the lookup. The spec originally
+//   routed the candidate's persisted env through resolveExecutionWorkspaceEnvironmentId
+//   ("Do NOT invent a new env-match heuristic"). The AIM-68 upstream rebase superseded
+//   that: origin/master redefined resolveExecutionWorkspaceEnvironmentId as a pure per-run
+//   precedence resolver (agent > instance > local) with no conflict arm and dropped the
+//   env-conflict gate from the existing-workspace reuse path, so the reused row no longer
+//   pins an environment. The dedicated env-conflict assertions were removed; the reuse
+//   decision itself stays pinned below via resolveSharedWorkspaceReuseDecision.
 //
 // Reuse decision contract (spec "Fix" lines: requestedShouldReuseExisting = true for a
 // shared target WITH a reusable candidate; existing formula at heartbeat
@@ -60,48 +65,12 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.ts";
 import {
-  resolveExecutionWorkspaceEnvironmentId,
   resolveSharedWorkspaceReuseDecision,
 } from "../services/execution-workspace-policy.ts";
 
 // The planned identity branch (the same value planExecutionWorkspaceBranch yields
 // for PAP-447 "Add Worktree Support"); branchName is part of the dedup identity.
 const BRANCH = "PAP-447-add-worktree-support";
-
-describe("resolveExecutionWorkspaceEnvironmentId env-conflict gate for shared_workspace reuse", () => {
-  // Spec "Environment matching (preserve PAPA-380 / PAPA-431)" + acceptance:
-  // because the shared candidate becomes the effective existingExecutionWorkspace,
-  // its persisted env is fed to the EXISTING resolver and a conflict forces fresh
-  // realization (heartbeat: shouldReuseExisting = requestedShouldReuseExisting &&
-  // !environmentResolution.conflict). This pins the dependency the fix leans on so
-  // a reusable candidate is NOT silently reused on a mismatched environment.
-
-  it("flags a conflict when the candidate's persisted env differs from the assignee's intended env (forces create fresh)", () => {
-    const result = resolveExecutionWorkspaceEnvironmentId({
-      projectPolicy: { enabled: true, environmentId: null },
-      issueSettings: { environmentId: "sandbox-env", mode: "shared_workspace" },
-      // The reuse candidate persisted a local-env workspace.
-      workspaceConfig: { environmentId: "local-env" },
-      agentDefaultEnvironmentId: "sandbox-env",
-      defaultEnvironmentId: "local-env",
-    });
-
-    expect(result.conflict).not.toBeNull();
-    expect(result.conflict?.reason).toBe("reused_workspace_environment_mismatch");
-  });
-
-  it("reports no conflict when the candidate's persisted env matches the assignee (reuse proceeds)", () => {
-    const result = resolveExecutionWorkspaceEnvironmentId({
-      projectPolicy: { enabled: true, environmentId: "agent-env" },
-      issueSettings: { environmentId: "agent-env", mode: "shared_workspace" },
-      workspaceConfig: { environmentId: "agent-env" },
-      agentDefaultEnvironmentId: "agent-env",
-      defaultEnvironmentId: "default-env",
-    });
-
-    expect(result.conflict).toBeNull();
-  });
-});
 
 describe("resolveSharedWorkspaceReuseDecision", () => {
   // Spec acceptance: a reusable candidate -> "reuse"; none -> "create"; an env
