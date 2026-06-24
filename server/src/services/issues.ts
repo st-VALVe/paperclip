@@ -75,6 +75,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
+import { resolveIssuePrefix } from "./issue-identifier-prefix.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { getDefaultCompanyGoal } from "./goals.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
@@ -5156,8 +5157,19 @@ export function issueService(db: Db) {
           .where(eq(companies.id, companyId))
           .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
 
+        const projectPrefix = issueData.projectId
+          ? (
+              await tx
+                .select({ issuePrefix: projects.issuePrefix })
+                .from(projects)
+                .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
+                .limit(1)
+            )[0]?.issuePrefix ?? null
+          : null;
+
         const issueNumber = company.issueCounter;
-        const identifier = `${company.issuePrefix}-${issueNumber}`;
+        const issuePrefix = resolveIssuePrefix(projectPrefix, company.issuePrefix);
+        const identifier = `${issuePrefix}-${issueNumber}`;
 
         const values = {
           ...issueData,
