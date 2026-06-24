@@ -94,11 +94,46 @@ describe("0111 project issue_prefix migration", () => {
 describe("issue creation derives the identifier prefix via resolveIssuePrefix", () => {
   const source = readSource(issuesServicePath);
 
+  // The creation-time identifier construction is the assignment whose value is
+  // built from the company-wide issue number (the other `identifier =` site
+  // resolves an inbound reference and has no issueNumber).
+  const identifierConstruction =
+    source.match(/\bidentifier\s*=\s*([^;]*\bissueNumber\b[^;]*);/)?.[1] ?? null;
+
+  // Strip the helper call so company.issuePrefix appearing only as the helper's
+  // fallback argument is not mistaken for a direct prefix interpolation.
+  const prefixPortion = (identifierConstruction ?? "").replace(
+    /resolveIssuePrefix\s*\([^)]*\)/g,
+    "__RESOLVED_PREFIX__",
+  );
+
+  const resolvedPrefixVar =
+    source.match(
+      /(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:await\s+)?resolveIssuePrefix\s*\(/,
+    )?.[1] ?? null;
+
   it("imports resolveIssuePrefix from the issue-identifier-prefix helper", () => {
     expect(source).toMatch(/import[^;]*resolveIssuePrefix[^;]*issue-identifier-prefix/s);
   });
 
-  it("calls resolveIssuePrefix when constructing the issue identifier", () => {
-    expect(source).toMatch(/resolveIssuePrefix\s*\(/);
+  it("calls resolveIssuePrefix with the company issuePrefix as the fallback argument", () => {
+    expect(source).toMatch(/resolveIssuePrefix\s*\(\s*[^,()]+,\s*[^)]*issuePrefix[^)]*\)/s);
+  });
+
+  it("constructs the new issue identifier from the company-wide issue number", () => {
+    expect(identifierConstruction).not.toBeNull();
+  });
+
+  it("builds the identifier prefix from the resolveIssuePrefix result, not from company.issuePrefix directly", () => {
+    expect(identifierConstruction).not.toBeNull();
+    expect(prefixPortion).not.toMatch(/company\??\.issuePrefix/);
+    const usesResolvedPrefix =
+      /__RESOLVED_PREFIX__/.test(prefixPortion) ||
+      (resolvedPrefixVar !== null && new RegExp(`\\b${resolvedPrefixVar}\\b`).test(prefixPortion));
+    expect(usesResolvedPrefix).toBe(true);
+  });
+
+  it("keeps the existing company-wide counter as the issue-number source", () => {
+    expect(source).toMatch(/issueNumber\s*=\s*company\.issueCounter/);
   });
 });
