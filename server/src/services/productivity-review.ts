@@ -113,6 +113,7 @@ function productivityChurnCountedRunSql() {
     ${heartbeatRuns.status} <> 'scheduled_retry'
     and not (
       ${heartbeatRuns.status} = 'failed'
+      and ${heartbeatRuns.errorCode} is not null
       and ${inArray(heartbeatRuns.errorCode, [...PRODUCTIVITY_TRANSIENT_ERROR_CODES])}
     )
   )`;
