@@ -137,6 +137,16 @@ export function buildCompactWorkingStatePacket(
   };
 }
 
+export function buildCompactWorkingStateHandoffMarkdown(
+  input: BuildCompactWorkingStatePacketInput,
+): string | null {
+  if (!input.selfReport || typeof input.selfReport !== "object") {
+    return null;
+  }
+  const packet = buildCompactWorkingStatePacket(input);
+  return `\`\`\`handoff-v1\n${JSON.stringify(packet, null, 2)}\n\`\`\``;
+}
+
 export function isStaleCompactWorkingStatePacket(
   packet: CompactWorkingStateSource,
   current: CompactWorkingStateSource,
