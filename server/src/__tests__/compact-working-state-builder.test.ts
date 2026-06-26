@@ -149,6 +149,20 @@ const compactWorkingStateFixtureCorpus = [
   { name: "packet with asserted passing tests and no verified evidence", valid: true, build: assertedOnlyContractPacket },
   { name: "packet with verified passing tests and valid evidence refs", valid: true, build: verifiedContractPacket },
   {
+    name: "packet with renamed file and no previousPath",
+    valid: true,
+    build: () => {
+      const packet = validContractPacket() as Record<string, any>;
+      packet.changes.files[0] = {
+        path: "server/src/services/compact-working-state.ts",
+        status: "renamed",
+        verified: false,
+        evidence: [],
+      };
+      return packet;
+    },
+  },
+  {
     name: "packet with raw transcript body",
     valid: false,
     build: () => {
