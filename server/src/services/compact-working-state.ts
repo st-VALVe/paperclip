@@ -201,8 +201,6 @@ function validateChanges(value: unknown): void {
       if (status !== "renamed") {
         throw new Error(`Field "changes.files[${i}].previousPath" is allowed only when status is renamed`);
       }
-    } else if (status === "renamed") {
-      throw new Error(`Missing changes.files[${i}].previousPath`);
     }
     validateEvidenceRefs(file.evidence, `changes.files[${i}].evidence`, { requireVerified: verified });
   }
