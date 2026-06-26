@@ -68,6 +68,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { buildCompactWorkingStateHandoffMarkdown } from "./compact-working-state.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -1724,6 +1725,12 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
 
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function readModelProfileKey(value: unknown): ModelProfileKey | null {
@@ -9385,6 +9392,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       continuationSummaryBody: continuationSummary?.body ?? null,
     });
+    const compactWorkingStateSelfReport = readRecord(context.paperclipCompactWorkingStateSelfReport);
+    const compactWorkingStateHandoffMarkdown =
+      resetTaskSession && compactWorkingStateSelfReport && issueRef && readNonEmptyString(run.sessionIdBefore)
+        ? buildCompactWorkingStateHandoffMarkdown({
+          issue: {
+            identifier: issueRef.identifier,
+            id: issueRef.id,
+            objective: issueRef.title,
+          },
+          currentRun: { id: run.id },
+          persistedSession: { id: run.sessionIdBefore },
+          currentAgent: { role: agent.role, name: agent.name },
+          stage: readNonEmptyString(context.paperclipCompactWorkingStateStage) ?? undefined,
+          selfReport: compactWorkingStateSelfReport,
+          observedChanges: readRecord(context.paperclipCompactWorkingStateObservedChanges) ?? { files: [], commits: [] },
+          artifacts: Array.isArray(context.paperclipCompactWorkingStateArtifacts)
+            ? context.paperclipCompactWorkingStateArtifacts
+            : [{ kind: "run_log", ref: `paperclip:run:${run.id}:log` }],
+          rawTranscriptRefs: Array.isArray(context.paperclipCompactWorkingStateRawTranscriptRefs)
+            ? context.paperclipCompactWorkingStateRawTranscriptRefs
+            : [],
+        })
+        : null;
     if (sessionCompaction.rotate) {
       context.paperclipSessionHandoffMarkdown = sessionCompaction.handoffMarkdown;
       context.paperclipSessionRotationReason = sessionCompaction.reason;
@@ -9398,7 +9428,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
       }
     } else {
-      delete context.paperclipSessionHandoffMarkdown;
+      if (compactWorkingStateHandoffMarkdown) {
+        context.paperclipSessionHandoffMarkdown = compactWorkingStateHandoffMarkdown;
+      } else {
+        delete context.paperclipSessionHandoffMarkdown;
+      }
       delete context.paperclipSessionRotationReason;
       delete context.paperclipPreviousSessionId;
     }
