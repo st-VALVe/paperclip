@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildCompactWorkingStatePacket, isStaleCompactWorkingStatePacket } from "../services/compact-working-state.js";
+import {
+  buildCompactWorkingStatePacket,
+  isStaleCompactWorkingStatePacket,
+  validateCompactWorkingStatePacket,
+} from "../services/compact-working-state.js";
 
 function validSameRoleCompactPacket(overrides: Record<string, unknown> = {}) {
   return {
@@ -23,6 +27,139 @@ function validSameRoleCompactPacket(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+function validContractPacket(overrides: Record<string, unknown> = {}) {
+  return {
+    v: 1,
+    packetKind: "compact_working_state",
+    issue: "PB-81",
+    issueId: "8b5a9a0b-0000-0000-0000-000000000000",
+    stage: "implementation",
+    from: "engineer",
+    to: "engineer",
+    status: "in_progress",
+    objective: "Implement the scoped fix for PB-81.",
+    workingNotes: "Current approach: keep the change scoped to telemetry parsing.",
+    blocker: null,
+    next: "Continue implementation from the listed working notes and acceptance state.",
+    ...validSameRoleCompactPacket({
+      changes: {
+        files: [
+          {
+            path: "server/src/services/heartbeat.ts",
+            status: "modified",
+            verified: true,
+            evidence: [{ kind: "git_diff", ref: "git:file:server/src/services/heartbeat.ts", verified: true }],
+          },
+        ],
+        commits: [],
+      },
+      tests: {
+        written: [
+          {
+            path: "server/src/__tests__/heartbeat-usage-telemetry.test.ts",
+            kind: "unit",
+            status: "added",
+            verified: true,
+            evidence: [
+              {
+                kind: "git_diff",
+                ref: "git:file:server/src/__tests__/heartbeat-usage-telemetry.test.ts",
+                verified: true,
+              },
+            ],
+          },
+        ],
+        runs: [
+          {
+            command: "pnpm vitest server/src/__tests__/heartbeat-usage-telemetry.test.ts",
+            result: "not_run",
+            assertedBy: "agent",
+            verified: false,
+            evidence: [],
+          },
+        ],
+      },
+    }),
+    ...overrides,
+  };
+}
+
+function blockedContractPacket() {
+  const packet = validContractPacket({
+    status: "blocked",
+    blocker: {
+      summary: "Waiting for owner confirmation on scope.",
+      owner: "owner",
+      evidence: [{ kind: "comment", ref: "paperclip:comment:12345", verified: true }],
+    },
+  }) as Record<string, unknown>;
+  (packet.requiredHandoff as Record<string, unknown>).status = "blocked";
+  return packet;
+}
+
+function requiredHandoffContractPacket() {
+  const packet = validContractPacket() as Record<string, unknown>;
+  packet.requiredHandoff = {
+    required: true,
+    to: "code-reviewer",
+    status: "in_progress",
+    reason: "Implementation is ready for code review.",
+  };
+  return packet;
+}
+
+function assertedOnlyContractPacket() {
+  const packet = validContractPacket() as Record<string, any>;
+  packet.acceptance[0].status = "asserted_passed";
+  packet.acceptance[0].verified = false;
+  packet.acceptance[0].evidence = [];
+  packet.tests.runs[0].result = "asserted_passed";
+  packet.tests.runs[0].verified = false;
+  packet.tests.runs[0].evidence = [];
+  return packet;
+}
+
+function verifiedContractPacket() {
+  const packet = validContractPacket() as Record<string, any>;
+  const evidence = { kind: "test_command", ref: "paperclip:run:92a19da5:event:7", verified: true };
+  packet.acceptance[0].status = "verified_passed";
+  packet.acceptance[0].verified = true;
+  packet.acceptance[0].evidence = [evidence];
+  packet.tests.runs[0].result = "verified_passed";
+  packet.tests.runs[0].verified = true;
+  packet.tests.runs[0].evidence = [evidence];
+  return packet;
+}
+
+const compactWorkingStateFixtureCorpus = [
+  { name: "valid same-role compact packet", valid: true, build: validContractPacket },
+  { name: "valid blocked compact packet", valid: true, build: blockedContractPacket },
+  { name: "compact packet with future requiredHandoff", valid: true, build: requiredHandoffContractPacket },
+  {
+    name: "packet missing packetKind",
+    valid: false,
+    build: () => {
+      const packet = validContractPacket() as Record<string, unknown>;
+      delete packet.packetKind;
+      return packet;
+    },
+  },
+  { name: "packet with status blocked and blocker null", valid: false, build: () => validContractPacket({ status: "blocked" }) },
+  { name: "packet with asserted passing tests and no verified evidence", valid: true, build: assertedOnlyContractPacket },
+  { name: "packet with verified passing tests and valid evidence refs", valid: true, build: verifiedContractPacket },
+  {
+    name: "packet with raw transcript body",
+    valid: false,
+    build: () => {
+      const packet = validContractPacket() as Record<string, any>;
+      packet.rawTranscriptRefs[0].body = "raw transcript text";
+      return packet;
+    },
+  },
+  { name: "packet with oversized workingNotes", valid: false, build: () => validContractPacket({ workingNotes: "x".repeat(1501) }) },
+  { name: "stale-source packet", valid: true, build: () => validContractPacket({ sourceRunId: "stale-run", sourceSessionId: "stale-session" }) },
+];
 
 function validBuilderInput(overrides: Record<string, unknown> = {}) {
   const packet = validSameRoleCompactPacket();
@@ -54,6 +191,17 @@ function validBuilderInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe("compact working-state builder provenance", () => {
+  it("[BLIND] validates the compact working-state fixture corpus", () => {
+    for (const fixture of compactWorkingStateFixtureCorpus) {
+      const packet = fixture.build();
+      if (fixture.valid) {
+        expect(() => validateCompactWorkingStatePacket(packet)).not.toThrow();
+      } else {
+        expect(() => validateCompactWorkingStatePacket(packet)).toThrow();
+      }
+    }
+  });
+
   it("[BLIND] derives same-role from/to from the current agent role, not self-report", () => {
     const packet = buildCompactWorkingStatePacket(validBuilderInput({
       currentAgent: { role: "engineer", name: "pipeline-engineer" },
