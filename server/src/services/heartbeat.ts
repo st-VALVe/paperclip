@@ -69,6 +69,10 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { buildCompactWorkingStateHandoffMarkdown } from "./compact-working-state.js";
+import {
+  captureCompactWorkingStateSelfReportForFreshSession,
+  shouldRequestCompactWorkingStateSelfReport,
+} from "./compact-working-state-self-report.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -2431,14 +2435,16 @@ export function applyCompactWorkingStateHandoffForFreshSession(input: {
   resetTaskSession: boolean;
   issueRef: { id: unknown; identifier: unknown; title: unknown } | null;
   run: { id: unknown; sessionIdBefore: unknown };
+  sourceSessionId?: unknown;
   agent: { role: unknown; name: unknown };
 }): string | null {
   const compactWorkingStateSelfReport = readRecord(input.context.paperclipCompactWorkingStateSelfReport);
+  const sourceSessionId = readNonEmptyString(input.sourceSessionId);
   const compactWorkingStateHandoffMarkdown =
     input.resetTaskSession &&
     compactWorkingStateSelfReport &&
     input.issueRef &&
-    readNonEmptyString(input.run.sessionIdBefore)
+    sourceSessionId
       ? buildCompactWorkingStateHandoffMarkdown({
         issue: {
           identifier: input.issueRef.identifier,
@@ -2446,7 +2452,7 @@ export function applyCompactWorkingStateHandoffForFreshSession(input: {
           objective: input.issueRef.title,
         },
         currentRun: { id: input.run.id },
-        persistedSession: { id: input.run.sessionIdBefore },
+        persistedSession: { id: sourceSessionId },
         currentAgent: { role: input.agent.role, name: input.agent.name },
         stage: readNonEmptyString(input.context.paperclipCompactWorkingStateStage) ?? undefined,
         selfReport: compactWorkingStateSelfReport,
@@ -8642,6 +8648,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         (sessionCodec.getDisplayId ? sessionCodec.getDisplayId(explicitResumeSessionParams) : null) ??
         readNonEmptyString(explicitResumeSessionParams?.sessionId),
     );
+    const compactSelfReportPreviousSessionParams =
+      explicitResumeSessionParams ??
+      (isCanonicalSessionIdForAdapter(agent.adapterType, explicitResumeSessionDisplayId)
+        ? { sessionId: explicitResumeSessionDisplayId }
+        : null) ??
+      normalizeResumeParamsForAdapter(
+        agent.adapterType,
+        stripConfiguredModelFromSessionParams(taskSessionDecodedParams),
+      );
+    const compactSelfReportPreviousSessionDisplayId = truncateDisplayId(
+      explicitResumeSessionDisplayId ??
+        taskSession?.sessionDisplayId ??
+        (sessionCodec.getDisplayId ? sessionCodec.getDisplayId(compactSelfReportPreviousSessionParams) : null) ??
+        readNonEmptyString(compactSelfReportPreviousSessionParams?.sessionId),
+    );
     const previousSessionParams =
       explicitResumeSessionParams ??
       (isCanonicalSessionIdForAdapter(agent.adapterType, explicitResumeSessionDisplayId)
@@ -9353,6 +9374,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       },
     });
     const runtimeSessionParams = runtimeSessionResolution.sessionParams;
+    const compactSelfReportSessionResolution = resolveRuntimeSessionParamsForWorkspace({
+      agentId: agent.id,
+      previousSessionParams: compactSelfReportPreviousSessionParams,
+      resolvedWorkspace: {
+        ...resolvedWorkspace,
+        cwd: executionWorkspace.cwd,
+      },
+    });
+    const compactSelfReportSessionParams = compactSelfReportSessionResolution.sessionParams;
+    const compactSelfReportSessionDisplayId = truncateDisplayId(
+      compactSelfReportPreviousSessionDisplayId ??
+        (sessionCodec.getDisplayId ? sessionCodec.getDisplayId(compactSelfReportSessionParams) : null) ??
+        readNonEmptyString(compactSelfReportSessionParams?.sessionId),
+    );
+    const compactSelfReportSessionId =
+      readNonEmptyString(compactSelfReportSessionParams?.sessionId) ??
+      (isCanonicalSessionIdForAdapter(agent.adapterType, compactSelfReportSessionDisplayId)
+        ? compactSelfReportSessionDisplayId
+        : null);
     const runtimeWorkspaceWarnings = [
       ...resolvedWorkspace.warnings,
       ...executionWorkspace.warnings,
@@ -9448,7 +9488,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
       }
     } else {
-      applyCompactWorkingStateHandoffForFreshSession({ context, resetTaskSession, issueRef, run, agent });
       delete context.paperclipSessionRotationReason;
       delete context.paperclipPreviousSessionId;
     }
@@ -9745,6 +9784,123 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
       }
+      const onAdapterSpawn = async (meta: { pid: number; processGroupId: number | null; startedAt: string }) => {
+        await persistRunProcessMetadata(run.id, {
+          pid: meta.pid,
+          processGroupId:
+            "processGroupId" in meta && typeof meta.processGroupId === "number"
+              ? meta.processGroupId
+              : null,
+          startedAt: meta.startedAt,
+        });
+      };
+      let capturedCompactSelfReportSourceSessionId: string | null = null;
+      if (!sessionCompaction.rotate) {
+        const wantsCompactSelfReport = shouldRequestCompactWorkingStateSelfReport({
+          adapterType: agent.adapterType,
+          resetTaskSession,
+          context,
+        });
+        if (wantsCompactSelfReport && !compactSelfReportSessionId) {
+          delete context.paperclipCompactWorkingStateSelfReport;
+          delete context.paperclipSessionHandoffMarkdown;
+          await onLog(
+            "stdout",
+            "[paperclip] Compact working-state self-report requested but no resumable claude_local session was available.\n",
+          );
+        } else if (wantsCompactSelfReport) {
+          await onLog("stdout", "[paperclip] Requesting compact working-state self-report before fresh session.\n");
+          const captureResult = await captureCompactWorkingStateSelfReportForFreshSession({
+            adapterType: agent.adapterType,
+            resetTaskSession,
+            context,
+            requestSelfReport: async (prompt) => {
+              const captureContext = { ...context };
+              delete captureContext.paperclipWake;
+              delete captureContext.paperclipSessionHandoffMarkdown;
+              delete captureContext.paperclipTaskMarkdown;
+
+              const result = await adapter.execute({
+                runId: run.id,
+                agent,
+                runtime: {
+                  sessionId: compactSelfReportSessionId,
+                  sessionParams: compactSelfReportSessionParams,
+                  sessionDisplayId: compactSelfReportSessionDisplayId,
+                  taskKey,
+                },
+                config: {
+                  ...runtimeConfig,
+                  bootstrapPromptTemplate: "",
+                  promptTemplate: prompt,
+                  maxTurnsPerRun: 1,
+                  timeoutSec: 120,
+                },
+                context: captureContext,
+                runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+                executionTarget,
+                executionTransport: remoteExecution
+                  ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
+                  : undefined,
+                onLog,
+                onMeta: async (meta) => {
+                  await appendRunEvent(currentRun, seq++, {
+                    eventType: "adapter.invoke",
+                    stream: "system",
+                    level: "info",
+                    message: "compact working-state self-report adapter invocation",
+                    payload: {
+                      ...(meta as unknown as Record<string, unknown>),
+                      phase: "compact_working_state_self_report",
+                    },
+                  });
+                },
+                onSpawn: async () => {},
+                authToken: authToken ?? undefined,
+              });
+              const returnedSessionId = readNonEmptyString(result.sessionDisplayId) ?? readNonEmptyString(result.sessionId);
+              if (returnedSessionId && returnedSessionId !== compactSelfReportSessionId) {
+                await onLog(
+                  "stdout",
+                  "[paperclip] Compact working-state self-report capture did not remain on the previous session.\n",
+                );
+                return "";
+              }
+              if (result.timedOut || result.errorMessage) return "";
+              const resultJson = parseObject(result.resultJson);
+              return readNonEmptyString(resultJson.result) ?? readNonEmptyString(result.summary) ?? "";
+            },
+          });
+          await onLog(
+            "stdout",
+            captureResult.captured
+              ? "[paperclip] Captured compact working-state self-report.\n"
+              : "[paperclip] Compact working-state self-report capture failed closed.\n",
+          );
+          if (captureResult.captured) {
+            capturedCompactSelfReportSourceSessionId = compactSelfReportSessionId;
+          }
+        }
+        if (!capturedCompactSelfReportSourceSessionId) {
+          delete context.paperclipCompactWorkingStateSelfReport;
+          delete context.paperclipSessionHandoffMarkdown;
+        }
+        applyCompactWorkingStateHandoffForFreshSession({
+          context,
+          resetTaskSession,
+          issueRef,
+          run,
+          sourceSessionId: capturedCompactSelfReportSourceSessionId,
+          agent,
+        });
+        await db
+          .update(heartbeatRuns)
+          .set({
+            contextSnapshot: context,
+            updatedAt: new Date(),
+          })
+          .where(eq(heartbeatRuns.id, run.id));
+      }
       let adapterFinalizeOutcome: "succeeded" | "failed" | null = null;
       const recordWorkspaceFinalize = async (
         status: "succeeded" | "failed",
@@ -9782,16 +9938,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             : undefined,
           onLog,
           onMeta: onAdapterMeta,
-          onSpawn: async (meta) => {
-            await persistRunProcessMetadata(run.id, {
-              pid: meta.pid,
-              processGroupId:
-                "processGroupId" in meta && typeof meta.processGroupId === "number"
-                  ? meta.processGroupId
-                  : null,
-              startedAt: meta.startedAt,
-            });
-          },
+          onSpawn: onAdapterSpawn,
           authToken: authToken ?? undefined,
         });
         // Adapter returned cleanly, which means its workspace-restore finally

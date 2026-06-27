@@ -1019,7 +1019,7 @@ describe("applyCompactWorkingStateHandoffForFreshSession", () => {
   const run = { id: "run-machine-id", sessionIdBefore: "session-machine-id" };
   const agent = { role: "engineer", name: "paperclip-engineer" };
 
-  it("sets compact handoff markdown for reset sessions with self-report and persisted session", () => {
+  it("sets compact handoff markdown for reset sessions with current-run capture source session", () => {
     const context: Record<string, unknown> = {
       paperclipCompactWorkingStateSelfReport: buildCompactSelfReport(),
       paperclipCompactWorkingStateStage: "implementation",
@@ -1030,6 +1030,7 @@ describe("applyCompactWorkingStateHandoffForFreshSession", () => {
       resetTaskSession: true,
       issueRef,
       run,
+      sourceSessionId: "session-machine-id",
       agent,
     });
 
@@ -1059,8 +1060,12 @@ describe("applyCompactWorkingStateHandoffForFreshSession", () => {
     expect(context).not.toHaveProperty("paperclipSessionHandoffMarkdown");
   });
 
-  it("does not set compact handoff markdown without reset or persisted session", () => {
+  it("does not set compact handoff markdown without reset or current-run capture source session", () => {
     const contextWithoutReset: Record<string, unknown> = {
+      paperclipSessionHandoffMarkdown: "stale",
+      paperclipCompactWorkingStateSelfReport: buildCompactSelfReport(),
+    };
+    const contextWithoutCaptureSource: Record<string, unknown> = {
       paperclipSessionHandoffMarkdown: "stale",
       paperclipCompactWorkingStateSelfReport: buildCompactSelfReport(),
     };
@@ -1077,6 +1082,15 @@ describe("applyCompactWorkingStateHandoffForFreshSession", () => {
       agent,
     })).toBeNull();
     expect(contextWithoutReset).not.toHaveProperty("paperclipSessionHandoffMarkdown");
+
+    expect(applyCompactWorkingStateHandoffForFreshSession({
+      context: contextWithoutCaptureSource,
+      resetTaskSession: true,
+      issueRef,
+      run,
+      agent,
+    })).toBeNull();
+    expect(contextWithoutCaptureSource).not.toHaveProperty("paperclipSessionHandoffMarkdown");
 
     expect(applyCompactWorkingStateHandoffForFreshSession({
       context: contextWithoutSession,
