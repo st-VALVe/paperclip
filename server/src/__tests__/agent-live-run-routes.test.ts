@@ -152,6 +152,24 @@ async function requestApp(
   }
 }
 
+function lastWakeupOptions() {
+  const call = mockHeartbeatService.wakeup.mock.calls.at(-1);
+  if (!call) throw new Error("Expected heartbeat.wakeup to be called");
+  return call[1] as { contextSnapshot?: Record<string, unknown> };
+}
+
+async function invokeHeartbeat(body: Record<string, unknown>) {
+  const res = await requestApp(
+    await createApp(),
+    (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${routeAgentId}/heartbeat/invoke?companyId=company-1`)
+      .send(body),
+  );
+
+  expect(res.status, JSON.stringify(res.body)).toBe(202);
+  return lastWakeupOptions();
+}
+
 describe("agent live run routes", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -586,6 +604,80 @@ describe("agent live run routes", () => {
     });
   });
 
+  it("maps explicit compact working state self-report requests on legacy heartbeat invoke", async () => {
+    const wakeup = await invokeHeartbeat({
+      forceFreshSession: true,
+      requestCompactWorkingStateSelfReport: true,
+    });
+
+    expect(wakeup.contextSnapshot).toEqual({
+      triggeredBy: "board",
+      actorId: "local-board",
+      forceFreshSession: true,
+      paperclipRequestCompactWorkingStateSelfReport: true,
+    });
+  });
+
+  it("does not map compact working state self-report without forceFreshSession on legacy heartbeat invoke", async () => {
+    const wakeup = await invokeHeartbeat({
+      requestCompactWorkingStateSelfReport: true,
+    });
+
+    expect(wakeup.contextSnapshot).toEqual({
+      triggeredBy: "board",
+      actorId: "local-board",
+    });
+  });
+
+  it("does not map compact working state self-report without explicit request on legacy heartbeat invoke", async () => {
+    const wakeup = await invokeHeartbeat({
+      forceFreshSession: true,
+    });
+
+    expect(wakeup.contextSnapshot).toEqual({
+      triggeredBy: "board",
+      actorId: "local-board",
+      forceFreshSession: true,
+    });
+  });
+
+  it.each([
+    ["string true", "true"],
+    ["number one", 1],
+    ["object", {}],
+  ])("rejects non-boolean compact working state self-report value %s", async (_name, value) => {
+    const wakeup = await invokeHeartbeat({
+      forceFreshSession: true,
+      requestCompactWorkingStateSelfReport: value,
+    });
+
+    expect(wakeup.contextSnapshot).toEqual({
+      triggeredBy: "board",
+      actorId: "local-board",
+      forceFreshSession: true,
+    });
+  });
+
+  it("does not infer compact working state self-report from unrelated invoke fields", async () => {
+    const wakeup = await invokeHeartbeat({
+      forceFreshSession: true,
+      adapterType: "codex_local",
+      telemetry: { requestCompactWorkingStateSelfReport: true },
+      residentWindow: true,
+      residentWindowThreshold: 4,
+      residentWindowReason: "manual",
+      reason: "requestCompactWorkingStateSelfReport",
+      commentId: "comment-1",
+      commentBody: "requestCompactWorkingStateSelfReport: true",
+    });
+
+    expect(wakeup.contextSnapshot).toEqual({
+      triggeredBy: "board",
+      actorId: "local-board",
+      forceFreshSession: true,
+    });
+  });
+
   it("calls heartbeat.wakeup with the legacy minimal shape when the body is empty", async () => {
     const res = await requestApp(
       await createApp(),
@@ -605,5 +697,22 @@ describe("agent live run routes", () => {
         actorId: "local-board",
       },
     });
+  });
+
+  it("does not map compact working state self-report on the standard agent wakeup route", async () => {
+    const res = await requestApp(
+      await createApp(),
+      (baseUrl) => request(baseUrl)
+        .post(`/api/agents/${routeAgentId}/wakeup`)
+        .send({
+          forceFreshSession: true,
+          requestCompactWorkingStateSelfReport: true,
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(202);
+    expect(lastWakeupOptions().contextSnapshot).not.toHaveProperty(
+      "paperclipRequestCompactWorkingStateSelfReport",
+    );
   });
 });
