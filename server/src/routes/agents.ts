@@ -3353,6 +3353,7 @@ export function agentRoutes(
       payload: unknown;
       idempotencyKey: unknown;
       forceFreshSession: unknown;
+      requestCompactWorkingStateSelfReport: unknown;
       triggerDetail: unknown;
     }>;
     const contextSnapshot: Record<string, unknown> = {
@@ -3361,6 +3362,9 @@ export function agentRoutes(
     };
     if (body.forceFreshSession === true) {
       contextSnapshot.forceFreshSession = true;
+      if (body.requestCompactWorkingStateSelfReport === true) {
+        contextSnapshot.paperclipRequestCompactWorkingStateSelfReport = true;
+      }
     }
     const wakeOpts: Parameters<typeof heartbeat.wakeup>[1] = {
       source: "on_demand",
