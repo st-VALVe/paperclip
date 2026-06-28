@@ -104,10 +104,15 @@ afterEach(() => {
 describe("compact working-state self-report capture prompt", () => {
   it("[BLIND] requests exactly one compact handoff-v1 packet and forbids raw transcript text", () => {
     const prompt = buildCompactWorkingStateSelfReportCapturePrompt();
+    const topLevelFields =
+      "v packetKind issue issueId sourceRunId sourceSessionId stage from to status objective workingNotes acceptance changes tests blocker requiredHandoff artifacts rawTranscriptRefs next".split(" ");
 
     expect(prompt).toMatch(/exactly one/i);
     expect(prompt).toContain("```handoff-v1");
     expect(prompt).toContain("compact_working_state");
+    for (const field of topLevelFields) {
+      expect(prompt).toContain(`\`${field}\``);
+    }
     expect(prompt).toMatch(/raw transcript/i);
     expect(prompt).toMatch(/do not include raw transcript|no raw transcript|forbid raw transcript/i);
     expect(prompt).not.toMatch(/\bexample\b|required shape|Q:/i);
@@ -195,6 +200,37 @@ describe("compact working-state self-report parsing", () => {
     expect(selfReport).not.toHaveProperty("changes");
     expect(selfReport).not.toHaveProperty("artifacts");
     expect(selfReport).not.toHaveProperty("rawTranscriptRefs");
+  });
+
+  it("[BLIND] canonicalizes common Claude compact packet shapes before validation", () => {
+    const packet = {
+      ...validCapturePacket({
+        status: "blocked",
+        acceptance: ["Capture attempt reached the resumable session."],
+        blocker: { reason: "Capture still needs operator review.", unblockOwner: "operator" },
+        requiredHandoff: { required: false, to: "operator", status: "in_progress", reason: "No handoff needed." },
+      }),
+    };
+
+    expect(parseCompactWorkingStateSelfReportCapture(fence(packet))).toMatchObject({
+      status: "blocked",
+      acceptance: [
+        {
+          id: "AC1",
+          text: "Capture attempt reached the resumable session.",
+          status: "pending",
+          assertedBy: "agent",
+          verified: false,
+          evidence: [],
+        },
+      ],
+      blocker: {
+        summary: "Capture still needs operator review.",
+        owner: "operator",
+        evidence: [],
+      },
+      requiredHandoff: { required: false, to: null, status: "in_progress", reason: null },
+    });
   });
 
   it.each([
