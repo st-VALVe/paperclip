@@ -9934,13 +9934,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // gate; it is a transient capture-control flag, cleared afterwards so it
           // does not persist into the rotated session context.
           context.paperclipRequestCompactWorkingStateSelfReport = true;
-          const captureResult = await captureCompactWorkingStateSelfReportForFreshSession({
-            adapterType: agent.adapterType,
-            resetTaskSession: true,
-            context,
-            requestSelfReport: requestCompactSelfReportProbe,
-          });
-          delete context.paperclipRequestCompactWorkingStateSelfReport;
+          let captureResult: Awaited<ReturnType<typeof captureCompactWorkingStateSelfReportForFreshSession>>;
+          try {
+            captureResult = await captureCompactWorkingStateSelfReportForFreshSession({
+              adapterType: agent.adapterType,
+              resetTaskSession: true,
+              context,
+              requestSelfReport: requestCompactSelfReportProbe,
+            });
+          } finally {
+            // Clear the transient capture-control flag even if capture throws, so
+            // it never persists into the rotated session context (defensive: the
+            // primitive cannot throw today, but its contract may change).
+            delete context.paperclipRequestCompactWorkingStateSelfReport;
+          }
           captured = captureResult.captured;
           await onLog(
             "stdout",
