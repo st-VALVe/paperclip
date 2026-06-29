@@ -1677,6 +1677,15 @@ type SessionCompactionDecision = {
   reason: string | null;
   handoffMarkdown: string | null;
   previousRunId: string | null;
+  // PB-39 resident-window rotation: when the (sole) reason that triggered the
+  // rotation is the resident-window threshold, the handoff vehicle must be the
+  // compact working-state packet (captured by the wiring), not handoffMarkdown.
+  // The wiring drives the capture + fail-closed counter, so it needs to know a
+  // resident-window rotation is due and the per-session prior failure count.
+  residentWindowRotation: boolean;
+  // Per-session consecutive fail-closed capture count carried by the latest run
+  // for this session (0 when none / not over threshold / signal absent).
+  residentWindowPriorCaptureFailureCount: number;
 };
 
 interface ParsedIssueAssigneeAdapterOverrides {
@@ -2144,6 +2153,31 @@ function readRawUsageTotals(usageJson: unknown): UsageTotals | null {
     cachedInputTokens,
     outputTokens,
   };
+}
+
+// PB-39 resident-window rotation observable markers. Booleans/counts only (no
+// content): redaction-safe and blind-testable in the heartbeat harness. The
+// failure count is per-session and must survive across wakes, so it is mirrored
+// into the run usageJson (which the engine already reads off the latest run).
+const RESIDENT_WINDOW_ROTATION_DEFERRED_KEY = "paperclipResidentWindowRotationDeferred";
+const RESIDENT_WINDOW_CAPTURE_FAILURE_COUNT_KEY = "paperclipResidentWindowCaptureFailureCount";
+const RESIDENT_WINDOW_CAPTURE_EXHAUSTED_KEY = "paperclipResidentWindowCaptureExhausted";
+// Fixed contract for this increment (spec section 4): after K consecutive
+// fail-closed captures on a still-over-threshold session, stop attempting.
+const RESIDENT_WINDOW_CAPTURE_MAX_ATTEMPTS = 3;
+
+function readResidentWindowTokens(usageJson: unknown): number | null {
+  const parsed = parseObject(usageJson);
+  const value = parsed.residentWindowTokens;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
+}
+
+function readResidentWindowCaptureFailureCount(usageJson: unknown): number {
+  const parsed = parseObject(usageJson);
+  const value = parsed[RESIDENT_WINDOW_CAPTURE_FAILURE_COUNT_KEY];
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 const RUN_USAGE_JSON_RESERVED_KEYS = new Set([
@@ -4543,23 +4577,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     continuationSummaryBody?: string | null;
   }): Promise<SessionCompactionDecision> {
     const { agent, sessionId, issueId } = input;
+    const noRotation = (previousRunId: string | null): SessionCompactionDecision => ({
+      rotate: false,
+      reason: null,
+      handoffMarkdown: null,
+      previousRunId,
+      residentWindowRotation: false,
+      residentWindowPriorCaptureFailureCount: 0,
+    });
     if (!sessionId) {
-      return {
-        rotate: false,
-        reason: null,
-        handoffMarkdown: null,
-        previousRunId: null,
-      };
+      return noRotation(null);
     }
 
     const policy = parseSessionCompactionPolicy(agent);
     if (!policy.enabled || !hasSessionCompactionThresholds(policy)) {
-      return {
-        rotate: false,
-        reason: null,
-        handoffMarkdown: null,
-        previousRunId: null,
-      };
+      return noRotation(null);
     }
 
     const fetchLimit = Math.max(policy.maxSessionRuns > 0 ? policy.maxSessionRuns + 1 : 0, 4);
@@ -4577,12 +4609,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .limit(fetchLimit);
 
     if (runs.length === 0) {
-      return {
-        rotate: false,
-        reason: null,
-        handoffMarkdown: null,
-        previousRunId: null,
-      };
+      return noRotation(null);
     }
 
     const latestRun = runs[0] ?? null;
@@ -4591,6 +4618,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? await getOldestRunForSession(agent.id, sessionId)
         : runs[runs.length - 1] ?? latestRun;
     const latestRawUsage = readRawUsageTotals(latestRun?.usageJson);
+    // PB-39: missing / zero / non-numeric residentWindowTokens => no resident
+    // rotation (fail-safe on signal absence, spec section 4).
+    const latestResidentWindowTokens = readResidentWindowTokens(latestRun?.usageJson);
+    const residentOverThreshold =
+      policy.maxResidentWindowTokens > 0 &&
+      latestResidentWindowTokens !== null &&
+      latestResidentWindowTokens >= policy.maxResidentWindowTokens;
+    // Per-session consecutive fail-closed count carried on the latest run. It is
+    // only meaningful while the session is still over threshold; once it drops
+    // below (or the session id changes => a different latest run) the count reads
+    // 0, which is the spec's reset (section 4).
+    const residentWindowPriorCaptureFailureCount = residentOverThreshold
+      ? readResidentWindowCaptureFailureCount(latestRun?.usageJson)
+      : 0;
     const sessionAgeHours =
       latestRun && oldestRun
         ? Math.max(
@@ -4599,7 +4640,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           )
         : 0;
 
+    // First-match precedence (spec section 4, fixed): runs -> rawInput ->
+    // resident-window -> age. Exactly one reason is reported per evaluation.
     let reason: string | null = null;
+    let residentWindowRotation = false;
     if (policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
       reason = `session exceeded ${policy.maxSessionRuns} runs`;
     } else if (
@@ -4610,17 +4654,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       reason =
         `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
         `(threshold ${formatCount(policy.maxRawInputTokens)})`;
+    } else if (residentOverThreshold && latestResidentWindowTokens !== null) {
+      // Reason MUST contain the token "resident window" (spec section 4).
+      reason =
+        `session resident window reached ${formatCount(latestResidentWindowTokens)} tokens ` +
+        `(threshold ${formatCount(policy.maxResidentWindowTokens)})`;
+      residentWindowRotation = true;
     } else if (policy.maxSessionAgeHours > 0 && sessionAgeHours >= policy.maxSessionAgeHours) {
       reason = `session age reached ${Math.floor(sessionAgeHours)} hours`;
     }
 
     if (!reason || !latestRun) {
-      return {
-        rotate: false,
-        reason: null,
-        handoffMarkdown: null,
-        previousRunId: latestRun?.id ?? null,
-      };
+      return noRotation(latestRun?.id ?? null);
     }
 
     const latestSummary = summarizeHeartbeatRunListResultJson({
@@ -4657,6 +4702,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       reason,
       handoffMarkdown,
       previousRunId: latestRun.id,
+      residentWindowRotation,
+      residentWindowPriorCaptureFailureCount,
     };
   }
 
@@ -9475,10 +9522,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
       continuationSummaryBody: continuationSummary?.body ?? null,
     });
-    if (sessionCompaction.rotate) {
+    // PB-39: a resident-window rotation is NOT committed here. Its handoff vehicle
+    // is the compact working-state packet, captured below by resuming the prior
+    // session; if that capture fails closed we must continue the current session
+    // (no rotate into an empty packet). So defer nulling the session for resident
+    // rotations until after the capture; commit runs/rawInput/age rotations now.
+    const residentWindowRotationPending =
+      sessionCompaction.rotate && sessionCompaction.residentWindowRotation;
+    const previousSessionIdForRotation = previousSessionDisplayId ?? runtimeSessionIdForAdapter;
+    let effectiveSessionRotated = sessionCompaction.rotate && !residentWindowRotationPending;
+    let effectiveRotationReason = effectiveSessionRotated ? sessionCompaction.reason : null;
+    if (effectiveSessionRotated) {
       context.paperclipSessionHandoffMarkdown = sessionCompaction.handoffMarkdown;
       context.paperclipSessionRotationReason = sessionCompaction.reason;
-      context.paperclipPreviousSessionId = previousSessionDisplayId ?? runtimeSessionIdForAdapter;
+      context.paperclipPreviousSessionId = previousSessionIdForRotation;
       runtimeSessionIdForAdapter = null;
       runtimeSessionParamsForAdapter = null;
       previousSessionDisplayId = null;
@@ -9795,7 +9852,166 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       };
       let capturedCompactSelfReportSourceSessionId: string | null = null;
-      if (!sessionCompaction.rotate) {
+      // Shared compact working-state capture probe: a bounded single-turn
+      // self-report invocation resumed on the prior session. Used by both the
+      // manual fresh-session path and the PB-39 resident-window rotation path.
+      const requestCompactSelfReportProbe = async (prompt: string) => {
+        const captureContext = { ...context };
+        delete captureContext.paperclipWake;
+        delete captureContext.paperclipSessionHandoffMarkdown;
+        delete captureContext.paperclipTaskMarkdown;
+
+        const result = await adapter.execute({
+          runId: run.id,
+          agent,
+          runtime: {
+            sessionId: compactSelfReportSessionId,
+            sessionParams: compactSelfReportSessionParams,
+            sessionDisplayId: compactSelfReportSessionDisplayId,
+            taskKey,
+          },
+          config: {
+            ...runtimeConfig,
+            bootstrapPromptTemplate: "",
+            promptTemplate: prompt,
+            maxTurnsPerRun: 1,
+            timeoutSec: 120,
+          },
+          context: captureContext,
+          runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+          executionTarget,
+          executionTransport: remoteExecution
+            ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
+            : undefined,
+          onLog,
+          onMeta: async (meta) => {
+            await appendRunEvent(currentRun, seq++, {
+              eventType: "adapter.invoke",
+              stream: "system",
+              level: "info",
+              message: "compact working-state self-report adapter invocation",
+              payload: {
+                ...(meta as unknown as Record<string, unknown>),
+                phase: "compact_working_state_self_report",
+              },
+            });
+          },
+          onSpawn: async () => {},
+          authToken: authToken ?? undefined,
+        });
+        const returnedSessionId = readNonEmptyString(result.sessionDisplayId) ?? readNonEmptyString(result.sessionId);
+        if (returnedSessionId && returnedSessionId !== compactSelfReportSessionId) {
+          await onLog(
+            "stdout",
+            "[paperclip] Compact working-state self-report capture did not remain on the previous session.\n",
+          );
+          return "";
+        }
+        if (result.timedOut || result.errorMessage) return "";
+        const resultJson = parseObject(result.resultJson);
+        return readNonEmptyString(resultJson.result) ?? readNonEmptyString(result.summary) ?? "";
+      };
+      if (residentWindowRotationPending) {
+        // PB-39: the resident-window rotation continues the task from a compact
+        // working-state packet. Capture is fail-closed: a failed capture must NOT
+        // rotate into an empty/fresh session (spec section 4). Bounded retry: at
+        // most K consecutive fail-closed attempts on a still-over-threshold
+        // session, then stop attempting (still no rotate). The per-session
+        // failure count is carried on the latest run's usageJson and persists
+        // across wakes; success / session-id change / no-longer-over-threshold
+        // reset it to 0 (handled in evaluateSessionCompaction).
+        const priorFailureCount = sessionCompaction.residentWindowPriorCaptureFailureCount;
+        const captureExhausted = priorFailureCount >= RESIDENT_WINDOW_CAPTURE_MAX_ATTEMPTS;
+        let captured = false;
+        if (!captureExhausted && compactSelfReportSessionId) {
+          await onLog(
+            "stdout",
+            "[paperclip] Requesting compact working-state self-report before resident-window rotation.\n",
+          );
+          // Reuse the PR#11 capture primitive. The resident-window rotation is a
+          // fresh-session transition, so resetTaskSession is true for capture and
+          // the request flag is set on the real context to satisfy the primitive
+          // gate; it is a transient capture-control flag, cleared afterwards so it
+          // does not persist into the rotated session context.
+          context.paperclipRequestCompactWorkingStateSelfReport = true;
+          let captureResult: Awaited<ReturnType<typeof captureCompactWorkingStateSelfReportForFreshSession>>;
+          try {
+            captureResult = await captureCompactWorkingStateSelfReportForFreshSession({
+              adapterType: agent.adapterType,
+              resetTaskSession: true,
+              context,
+              requestSelfReport: requestCompactSelfReportProbe,
+            });
+          } finally {
+            // Clear the transient capture-control flag even if capture throws, so
+            // it never persists into the rotated session context (defensive: the
+            // primitive cannot throw today, but its contract may change).
+            delete context.paperclipRequestCompactWorkingStateSelfReport;
+          }
+          captured = captureResult.captured;
+          await onLog(
+            "stdout",
+            captured
+              ? "[paperclip] Captured compact working-state self-report.\n"
+              : "[paperclip] Compact working-state self-report capture failed closed.\n",
+          );
+          if (captured) capturedCompactSelfReportSourceSessionId = compactSelfReportSessionId;
+        }
+
+        if (captured) {
+          // Build the compact packet handoff and commit the rotation.
+          applyCompactWorkingStateHandoffForFreshSession({
+            context,
+            resetTaskSession: true,
+            issueRef,
+            run,
+            sourceSessionId: capturedCompactSelfReportSourceSessionId,
+            agent,
+          });
+          if (readNonEmptyString(context.paperclipSessionHandoffMarkdown)) {
+            context.paperclipSessionRotationReason = sessionCompaction.reason;
+            context.paperclipPreviousSessionId = previousSessionIdForRotation;
+            delete context[RESIDENT_WINDOW_ROTATION_DEFERRED_KEY];
+            delete context[RESIDENT_WINDOW_CAPTURE_FAILURE_COUNT_KEY];
+            delete context[RESIDENT_WINDOW_CAPTURE_EXHAUSTED_KEY];
+            runtimeForAdapter.sessionId = null;
+            runtimeForAdapter.sessionParams = null;
+            runtimeForAdapter.sessionDisplayId = null;
+            effectiveSessionRotated = true;
+            effectiveRotationReason = sessionCompaction.reason;
+            if (sessionCompaction.reason) {
+              runtimeWorkspaceWarnings.push(
+                `Starting a fresh session because ${sessionCompaction.reason}.`,
+              );
+            }
+          } else {
+            captured = false;
+          }
+        }
+
+        if (!captured) {
+          // Fail closed: continue the current session, surface safe markers.
+          delete context.paperclipCompactWorkingStateSelfReport;
+          delete context.paperclipSessionHandoffMarkdown;
+          delete context.paperclipSessionRotationReason;
+          delete context.paperclipPreviousSessionId;
+          const nextFailureCount = captureExhausted ? priorFailureCount : priorFailureCount + 1;
+          context[RESIDENT_WINDOW_ROTATION_DEFERRED_KEY] = true;
+          context[RESIDENT_WINDOW_CAPTURE_FAILURE_COUNT_KEY] = nextFailureCount;
+          if (nextFailureCount >= RESIDENT_WINDOW_CAPTURE_MAX_ATTEMPTS) {
+            context[RESIDENT_WINDOW_CAPTURE_EXHAUSTED_KEY] = true;
+          } else {
+            delete context[RESIDENT_WINDOW_CAPTURE_EXHAUSTED_KEY];
+          }
+        }
+        await db
+          .update(heartbeatRuns)
+          .set({
+            contextSnapshot: context,
+            updatedAt: new Date(),
+          })
+          .where(eq(heartbeatRuns.id, run.id));
+      } else if (!sessionCompaction.rotate) {
         const wantsCompactSelfReport = shouldRequestCompactWorkingStateSelfReport({
           adapterType: agent.adapterType,
           resetTaskSession,
@@ -9814,62 +10030,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             adapterType: agent.adapterType,
             resetTaskSession,
             context,
-            requestSelfReport: async (prompt) => {
-              const captureContext = { ...context };
-              delete captureContext.paperclipWake;
-              delete captureContext.paperclipSessionHandoffMarkdown;
-              delete captureContext.paperclipTaskMarkdown;
-
-              const result = await adapter.execute({
-                runId: run.id,
-                agent,
-                runtime: {
-                  sessionId: compactSelfReportSessionId,
-                  sessionParams: compactSelfReportSessionParams,
-                  sessionDisplayId: compactSelfReportSessionDisplayId,
-                  taskKey,
-                },
-                config: {
-                  ...runtimeConfig,
-                  bootstrapPromptTemplate: "",
-                  promptTemplate: prompt,
-                  maxTurnsPerRun: 1,
-                  timeoutSec: 120,
-                },
-                context: captureContext,
-                runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
-                executionTarget,
-                executionTransport: remoteExecution
-                  ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
-                  : undefined,
-                onLog,
-                onMeta: async (meta) => {
-                  await appendRunEvent(currentRun, seq++, {
-                    eventType: "adapter.invoke",
-                    stream: "system",
-                    level: "info",
-                    message: "compact working-state self-report adapter invocation",
-                    payload: {
-                      ...(meta as unknown as Record<string, unknown>),
-                      phase: "compact_working_state_self_report",
-                    },
-                  });
-                },
-                onSpawn: async () => {},
-                authToken: authToken ?? undefined,
-              });
-              const returnedSessionId = readNonEmptyString(result.sessionDisplayId) ?? readNonEmptyString(result.sessionId);
-              if (returnedSessionId && returnedSessionId !== compactSelfReportSessionId) {
-                await onLog(
-                  "stdout",
-                  "[paperclip] Compact working-state self-report capture did not remain on the previous session.\n",
-                );
-                return "";
-              }
-              if (result.timedOut || result.errorMessage) return "";
-              const resultJson = parseObject(result.resultJson);
-              return readNonEmptyString(resultJson.result) ?? readNonEmptyString(result.summary) ?? "";
-            },
+            requestSelfReport: requestCompactSelfReportProbe,
           });
           await onLog(
             "stdout",
@@ -10093,9 +10254,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         sessionReused: runtimeForAdapter.sessionId != null || runtimeForAdapter.sessionDisplayId != null,
         taskSessionReused: taskSessionForRun != null,
         freshSession: runtimeForAdapter.sessionId == null && runtimeForAdapter.sessionDisplayId == null,
-        sessionRotated: sessionCompaction.rotate,
-        sessionRotationReason: sessionCompaction.reason,
+        sessionRotated: effectiveSessionRotated,
+        sessionRotationReason: effectiveRotationReason,
       });
+      // PB-39: mirror the per-session resident-window fail-closed count onto the
+      // persisted run usageJson so the next wake's evaluateSessionCompaction can
+      // read it off the latest run for the session (count only, redaction-safe).
+      const residentWindowFailureCountForRun = context[RESIDENT_WINDOW_CAPTURE_FAILURE_COUNT_KEY];
+      if (usageJson && typeof residentWindowFailureCountForRun === "number" && residentWindowFailureCountForRun > 0) {
+        usageJson[RESIDENT_WINDOW_CAPTURE_FAILURE_COUNT_KEY] = residentWindowFailureCountForRun;
+      }
 
       const persistedResultJson = mergeHeartbeatRunResultJson(
         mergeRunStopMetadataForAgent(agent, outcome, {

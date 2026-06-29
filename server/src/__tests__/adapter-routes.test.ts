@@ -312,6 +312,7 @@ describe("adapter routes", () => {
         maxSessionRuns: 10,
         maxRawInputTokens: 100_000,
         maxSessionAgeHours: 24,
+        maxResidentWindowTokens: 0,
       },
     };
     const externalModule: ServerAdapterModule = {
