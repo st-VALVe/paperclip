@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyCompactWorkingStateHandoffForFreshSession } from "../services/heartbeat.js";
 import {
+  buildCompactWorkingStatePacket,
+  validateCompactWorkingStatePacket,
+} from "../services/compact-working-state.js";
+import {
   buildCompactWorkingStateSelfReportCapturePrompt,
   captureCompactWorkingStateSelfReportForFreshSession,
   parseCompactWorkingStateSelfReportCapture,
@@ -77,6 +81,21 @@ function fence(packet: Record<string, unknown>) {
   return `\`\`\`handoff-v1\n${JSON.stringify(packet, null, 2)}\n\`\`\``;
 }
 
+function unsafeRawTranscriptPacket(key: "body" | "content" | "messages" | "transcript") {
+  return fence({
+    ...validCapturePacket(),
+    rawTranscriptRefs: [
+      {
+        ref: "paperclip:run:self-reported-run-id:transcript",
+        replayByDefault: false,
+        [key]: key === "messages"
+          ? [{ role: "assistant", content: "raw transcript text must fail closed" }]
+          : "raw transcript text must fail closed",
+      },
+    ],
+  });
+}
+
 function expectedSemanticSelfReport(packet = validCapturePacket()) {
   return {
     stage: packet.stage,
@@ -88,6 +107,27 @@ function expectedSemanticSelfReport(packet = validCapturePacket()) {
     requiredHandoff: packet.requiredHandoff,
     next: packet.next,
   };
+}
+
+function expectStrictPacketFromSemanticSelfReport(selfReport: Record<string, unknown>) {
+  const packet = buildCompactWorkingStatePacket({
+    issue: {
+      identifier: "PB-39",
+      id: "issue-machine-id",
+      objective: "Implement controlled claude_local compact state capture.",
+    },
+    currentRun: { id: "run-machine-id" },
+    persistedSession: { id: "session-machine-id" },
+    currentAgent: { role: "engineer", name: "paperclip-engineer" },
+    stage: "implementation",
+    selfReport,
+    observedChanges: { files: [], commits: [] },
+    artifacts: [],
+    rawTranscriptRefs: [],
+  });
+
+  expect(() => validateCompactWorkingStatePacket(packet)).not.toThrow();
+  return packet;
 }
 
 function parseSingleHandoffPacket(markdown: string) {
@@ -191,6 +231,7 @@ describe("compact working-state self-report parsing", () => {
     const selfReport = parseCompactWorkingStateSelfReportCapture(fence(packet));
 
     expect(selfReport).toEqual(expectedSemanticSelfReport(packet));
+    expectStrictPacketFromSemanticSelfReport(selfReport as Record<string, unknown>);
     expect(selfReport).not.toHaveProperty("issue");
     expect(selfReport).not.toHaveProperty("issueId");
     expect(selfReport).not.toHaveProperty("sourceRunId");
@@ -202,7 +243,7 @@ describe("compact working-state self-report parsing", () => {
     expect(selfReport).not.toHaveProperty("rawTranscriptRefs");
   });
 
-  it("[BLIND] canonicalizes common Claude compact packet shapes before validation", () => {
+  it("[BLIND] canonicalizes common Claude compact packet shapes into strict packet-compatible semantics", () => {
     const packet = {
       ...validCapturePacket({
         status: "blocked",
@@ -211,8 +252,9 @@ describe("compact working-state self-report parsing", () => {
         requiredHandoff: { required: false, to: "operator", status: "in_progress", reason: "No handoff needed." },
       }),
     };
+    const selfReport = parseCompactWorkingStateSelfReportCapture(fence(packet));
 
-    expect(parseCompactWorkingStateSelfReportCapture(fence(packet))).toMatchObject({
+    expect(selfReport).toMatchObject({
       status: "blocked",
       acceptance: [
         {
@@ -224,13 +266,21 @@ describe("compact working-state self-report parsing", () => {
           evidence: [],
         },
       ],
-      blocker: {
-        summary: "Capture still needs operator review.",
-        owner: "operator",
-        evidence: [],
-      },
-      requiredHandoff: { required: false, to: null, status: "in_progress", reason: null },
     });
+    const semanticBlocker = (selfReport as Record<string, unknown>).blocker as Record<string, unknown>;
+    const semanticHandoff = (selfReport as Record<string, unknown>).requiredHandoff as Record<string, unknown>;
+    expect(semanticBlocker).toEqual({
+      summary: "Capture still needs operator review.",
+      owner: "operator",
+      evidence: [],
+    });
+    expect(semanticBlocker).not.toHaveProperty("reason");
+    expect(semanticBlocker).not.toHaveProperty("unblockOwner");
+    expect(semanticHandoff).toEqual({ required: false, to: null, status: "in_progress", reason: null });
+
+    const strictPacket = expectStrictPacketFromSemanticSelfReport(selfReport as Record<string, unknown>);
+    expect(strictPacket.blocker).toEqual(semanticBlocker);
+    expect(strictPacket.requiredHandoff).toEqual(semanticHandoff);
   });
 
   it.each([
@@ -238,16 +288,10 @@ describe("compact working-state self-report parsing", () => {
     ["malformed", "not a compact packet"],
     ["wrong fence language", fence({ ...validCapturePacket(), packetKind: "compact_working_state" }).replace("handoff-v1", "json")],
     ["duplicate", `${fence(validCapturePacket())}\n\n${fence(validCapturePacket())}`],
-    ["raw transcript body", fence({
-      ...validCapturePacket(),
-      rawTranscriptRefs: [
-        {
-          ref: "paperclip:run:self-reported-run-id:transcript",
-          replayByDefault: false,
-          body: "raw transcript text must fail closed",
-        },
-      ],
-    })],
+    ["raw transcript body", unsafeRawTranscriptPacket("body")],
+    ["raw transcript content", unsafeRawTranscriptPacket("content")],
+    ["raw transcript messages", unsafeRawTranscriptPacket("messages")],
+    ["raw transcript transcript", unsafeRawTranscriptPacket("transcript")],
   ])("[BLIND] rejects %s capture output", (_name, output) => {
     expect(parseCompactWorkingStateSelfReportCapture(output)).toBeNull();
   });

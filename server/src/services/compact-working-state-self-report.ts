@@ -51,18 +51,20 @@ function canonicalizeBlocker(value: unknown): unknown {
     readNonEmptyString(blocker.action) ??
     readNonEmptyString(blocker.kind);
   if (!summary) return value;
-  return {
-    ...blocker,
+  const owner = readNonEmptyString(blocker.owner) ?? readNonEmptyString(blocker.unblockOwner);
+  const canonical: Record<string, unknown> = {
     summary,
-    owner: readNonEmptyString(blocker.owner) ?? readNonEmptyString(blocker.unblockOwner) ?? blocker.owner,
     evidence: Array.isArray(blocker.evidence) ? blocker.evidence : [],
   };
+  if (owner) canonical.owner = owner;
+  else if (blocker.owner !== undefined && blocker.owner !== null) canonical.owner = blocker.owner;
+  return canonical;
 }
 
 function canonicalizeRequiredHandoff(value: unknown): unknown {
   const handoff = readRecord(value);
   if (!handoff || handoff.required !== false) return value;
-  return { ...handoff, to: null, reason: null };
+  return { required: false, to: null, status: handoff.status, reason: null };
 }
 
 function canonicalizeCapturePacket(packet: Record<string, unknown>): Record<string, unknown> {
