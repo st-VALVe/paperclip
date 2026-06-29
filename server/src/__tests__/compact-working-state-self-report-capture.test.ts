@@ -283,6 +283,31 @@ describe("compact working-state self-report parsing", () => {
     expect(strictPacket.requiredHandoff).toEqual(semanticHandoff);
   });
 
+  it("[BLIND] canonicalizes a blocked packet with string blocker into strict blocker semantics", () => {
+    const selfReport = parseCompactWorkingStateSelfReportCapture(fence(validCapturePacket({
+      status: "blocked",
+      acceptance: ["Capture reached a blocked continuation state."],
+      blocker: "Waiting for operator confirmation before continuing.",
+      requiredHandoff: { required: false, to: null, status: "blocked", reason: null },
+    })));
+
+    expect(selfReport).not.toBeNull();
+    const semanticBlocker = (selfReport as Record<string, unknown>).blocker;
+    const semanticHandoff = (selfReport as Record<string, unknown>).requiredHandoff;
+    expect(semanticBlocker).toEqual({
+      summary: "Waiting for operator confirmation before continuing.",
+      evidence: [],
+    });
+    expect(typeof semanticBlocker).toBe("object");
+    expect(semanticBlocker).not.toHaveProperty("reason");
+    expect(semanticBlocker).not.toHaveProperty("unblockOwner");
+    expect(semanticHandoff).toEqual({ required: false, to: null, status: "blocked", reason: null });
+
+    const strictPacket = expectStrictPacketFromSemanticSelfReport(selfReport as Record<string, unknown>);
+    expect(strictPacket.blocker).toEqual(semanticBlocker);
+    expect(strictPacket.requiredHandoff).toEqual(semanticHandoff);
+  });
+
   it.each([
     ["missing", ""],
     ["malformed", "not a compact packet"],

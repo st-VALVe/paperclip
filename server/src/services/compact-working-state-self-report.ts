@@ -41,6 +41,11 @@ function canonicalizeAcceptance(value: unknown): unknown {
 }
 
 function canonicalizeBlocker(value: unknown): unknown {
+  const blockerText = readNonEmptyString(value);
+  if (blockerText) {
+    return { summary: blockerText, evidence: [] };
+  }
+
   const blocker = readRecord(value);
   if (!blocker) return value;
   const summary =
