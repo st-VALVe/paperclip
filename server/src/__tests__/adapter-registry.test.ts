@@ -593,6 +593,7 @@ describe("resolveExternalAdapterRegistration", () => {
         maxSessionRuns: 200,
         maxRawInputTokens: 2_000_000,
         maxSessionAgeHours: 72,
+        maxResidentWindowTokens: 0,
       },
     };
     const adapter: ServerAdapterModule = {

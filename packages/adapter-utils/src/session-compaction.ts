@@ -3,6 +3,7 @@ export interface SessionCompactionPolicy {
   maxSessionRuns: number;
   maxRawInputTokens: number;
   maxSessionAgeHours: number;
+  maxResidentWindowTokens: number;
 }
 
 export type NativeContextManagement = "confirmed" | "likely" | "unknown" | "none";
@@ -25,6 +26,7 @@ const DEFAULT_SESSION_COMPACTION_POLICY: SessionCompactionPolicy = {
   maxSessionRuns: 200,
   maxRawInputTokens: 2_000_000,
   maxSessionAgeHours: 72,
+  maxResidentWindowTokens: 0,
 };
 
 // Adapters with native context management still participate in session resume,
@@ -34,6 +36,17 @@ const ADAPTER_MANAGED_SESSION_POLICY: SessionCompactionPolicy = {
   maxSessionRuns: 0,
   maxRawInputTokens: 0,
   maxSessionAgeHours: 0,
+  maxResidentWindowTokens: 0,
+};
+
+// claude_local keeps every other native-managed threshold off but bounds the
+// resident context window (PB-39): PB-81 showed native context management did
+// not bound the resident window of a runaway session. Cloned (not mutated) so
+// the resident-window default does NOT leak to the other adapters that alias
+// ADAPTER_MANAGED_SESSION_POLICY (acpx_local / codex_local / hermes_local).
+const CLAUDE_LOCAL_SESSION_POLICY: SessionCompactionPolicy = {
+  ...ADAPTER_MANAGED_SESSION_POLICY,
+  maxResidentWindowTokens: 112_000,
 };
 
 export const LEGACY_SESSIONED_ADAPTER_TYPES = new Set([
@@ -57,7 +70,7 @@ export const ADAPTER_SESSION_MANAGEMENT: Record<string, AdapterSessionManagement
   claude_local: {
     supportsSessionResume: true,
     nativeContextManagement: "confirmed",
-    defaultSessionCompaction: ADAPTER_MANAGED_SESSION_POLICY,
+    defaultSessionCompaction: CLAUDE_LOCAL_SESSION_POLICY,
   },
   codex_local: {
     supportsSessionResume: true,
@@ -146,11 +159,13 @@ export function readSessionCompactionOverride(runtimeConfig: unknown): Partial<S
   const maxSessionRuns = readNumber(compaction.maxSessionRuns);
   const maxRawInputTokens = readNumber(compaction.maxRawInputTokens);
   const maxSessionAgeHours = readNumber(compaction.maxSessionAgeHours);
+  const maxResidentWindowTokens = readNumber(compaction.maxResidentWindowTokens);
 
   if (enabled !== undefined) explicit.enabled = enabled;
   if (maxSessionRuns !== undefined) explicit.maxSessionRuns = maxSessionRuns;
   if (maxRawInputTokens !== undefined) explicit.maxRawInputTokens = maxRawInputTokens;
   if (maxSessionAgeHours !== undefined) explicit.maxSessionAgeHours = maxSessionAgeHours;
+  if (maxResidentWindowTokens !== undefined) explicit.maxResidentWindowTokens = maxResidentWindowTokens;
 
   return explicit;
 }
@@ -174,6 +189,8 @@ export function resolveSessionCompactionPolicy(
       maxSessionRuns: explicitOverride.maxSessionRuns ?? basePolicy.maxSessionRuns,
       maxRawInputTokens: explicitOverride.maxRawInputTokens ?? basePolicy.maxRawInputTokens,
       maxSessionAgeHours: explicitOverride.maxSessionAgeHours ?? basePolicy.maxSessionAgeHours,
+      maxResidentWindowTokens:
+        explicitOverride.maxResidentWindowTokens ?? basePolicy.maxResidentWindowTokens ?? 0,
     },
     adapterSessionManagement,
     explicitOverride,
@@ -187,7 +204,12 @@ export function resolveSessionCompactionPolicy(
 
 export function hasSessionCompactionThresholds(policy: Pick<
   SessionCompactionPolicy,
-  "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours"
+  "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours" | "maxResidentWindowTokens"
 >) {
-  return policy.maxSessionRuns > 0 || policy.maxRawInputTokens > 0 || policy.maxSessionAgeHours > 0;
+  return (
+    policy.maxSessionRuns > 0 ||
+    policy.maxRawInputTokens > 0 ||
+    policy.maxSessionAgeHours > 0 ||
+    policy.maxResidentWindowTokens > 0
+  );
 }
