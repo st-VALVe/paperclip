@@ -32,7 +32,10 @@ import {
 // observable as: the adapter run's resumed session id (null => rotated into a
 // fresh session; previous id => continued current session), the rotation
 // context fields (paperclipSessionRotationReason / paperclipSessionHandoffMarkdown),
-// and the persisted run usageJson (sessionRotated / sessionRotationReason).
+// the fail-closed safe markers (paperclipResidentWindowRotationDeferred /
+// paperclipResidentWindowCaptureFailureCount / paperclipResidentWindowCaptureExhausted,
+// spec section 4 "Observable markers"), and the persisted run usageJson
+// (sessionRotated / sessionRotationReason).
 //
 // Per spec section 5/7 the production default (112000) and K (3) are tuning
 // values: these tests set an explicit TEST threshold and assert BEHAVIOUR
@@ -180,6 +183,23 @@ function parseSingleHandoffPacket(markdown: unknown) {
 /** Is the reported rotation reason a resident-window reason (spec's own term)? */
 function isResidentWindowReason(reason: unknown): boolean {
   return typeof reason === "string" && /resident.?window/i.test(reason);
+}
+
+/** Count of capture-probe adapter invocations recorded on the mock so far. */
+function countCaptureCalls(): number {
+  return adapterExecute.mock.calls.filter((args) => isCaptureCall(args[0] as AdapterInput)).length;
+}
+
+/**
+ * Context of the most recent main (non-capture) adapter invocation recorded on
+ * the mock. The marker context fields persist across wakes, so the latest main
+ * call carries the markers observed after the most recent wake.
+ */
+function lastMainCallContext(): Record<string, unknown> {
+  const mainCalls = adapterExecute.mock.calls.filter((args) => !isCaptureCall(args[0] as AdapterInput));
+  const last = mainCalls[mainCalls.length - 1]?.[0] as AdapterInput | undefined;
+  expect(last).toBeDefined();
+  return last!.context;
 }
 
 async function createGitRepo(tempRoots: Set<string>) {
@@ -569,13 +589,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
   }, 20_000);
 
   // ---- B7: fail-closed capture when a resident rotation is due => no rotate -
-  // NOTE (blind authorability): the spec mandates a "safe marker present" but
-  // does not define the marker's key/shape/surface, and section 7 leaves the
-  // K-counter persistence location undecided and explicitly out of Test-Author
-  // scope. So this test asserts only the OBSERVABLE behavioural contract of B7:
-  // a failed capture suppresses the resident rotation (continue current session)
-  // and sets no compact handoff markdown. The marker-identity assertion is not
-  // authored here (documented in the deliverable, not fabricated).
+  // Spec section 4 "Observable markers" + B7: a failed capture suppresses the
+  // resident rotation (continue current session, no compact handoff markdown),
+  // sets context.paperclipResidentWindowRotationDeferred === true, and
+  // increments context.paperclipResidentWindowCaptureFailureCount (per-session
+  // consecutive-failure count, persisted across wakes).
   it("[BLIND] does not rotate into a fresh session when the compact capture fails closed (B7)", async () => {
     const fixture = await seedFixture({
       runtimeConfig: thresholdRuntimeConfig(TEST_RESIDENT_THRESHOLD),
@@ -607,58 +625,262 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
     expect(mainCall.runtime.sessionId).toBe(previousSessionId);
     expect(mainCall.context).not.toHaveProperty("paperclipSessionHandoffMarkdown");
     expect(run.usageJson?.sessionRotated).toBe(false);
+    // Safe deferral marker present (spec section 4 "Observable markers").
+    expect(mainCall.context.paperclipResidentWindowRotationDeferred).toBe(true);
+    // Consecutive-failure count incremented (>= 1 after the first fail-closed wake).
+    expect(typeof mainCall.context.paperclipResidentWindowCaptureFailureCount).toBe("number");
+    expect(mainCall.context.paperclipResidentWindowCaptureFailureCount as number).toBeGreaterThanOrEqual(1);
   }, 20_000);
 
+  it("[BLIND] increments the per-session failure count across consecutive fail-closed wakes (B7)", async () => {
+    // Spec B7 / section 4: the count is a per-session CONSECUTIVE-failure count
+    // that persists across wakes. Two consecutive fail-closed wakes => the count
+    // observed on the later wake is strictly greater than on the earlier wake.
+    const fixture = await seedFixture({
+      runtimeConfig: thresholdRuntimeConfig(TEST_RESIDENT_THRESHOLD),
+      priorResidentWindowTokens: TEST_RESIDENT_THRESHOLD,
+    });
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      isCaptureCall(input)
+        ? adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            resultJson: { result: "" },
+            summary: "",
+          })
+        : adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            summary: "Continued current session after fail-closed capture.",
+          }),
+    );
+
+    await runHeartbeat(fixture);
+    const countAfterFirst = lastMainCallContext().paperclipResidentWindowCaptureFailureCount as number;
+    await runHeartbeat(fixture);
+    const countAfterSecond = lastMainCallContext().paperclipResidentWindowCaptureFailureCount as number;
+
+    expect(countAfterFirst).toBeGreaterThanOrEqual(1);
+    expect(countAfterSecond).toBeGreaterThan(countAfterFirst);
+  }, 40_000);
+
   // ---- B7a: bounded capture retry across K fail-closed wakes ----------------
-  // NOTE (blind authorability): same marker-identity caveat as B7. This test
-  // asserts the OBSERVABLE bound -- after K consecutive fail-closed captures on
-  // an over-threshold session, a further wake makes NO additional capture
-  // attempt and still does not rotate. K is taken as a small explicit value via
-  // the spec's "small constant" contract; the distinct "capture exhausted"
-  // marker string/field is NOT asserted (documented in the deliverable).
-  it("[BLIND] stops attempting capture and still does not rotate after K consecutive fail-closed captures (B7a)", async () => {
-    const K = 3; // spec: K is a small constant; assert the bound structurally.
+  // Spec B7a + section 4: after K consecutive fail-closed captures on an
+  // over-threshold session, no further capture attempt that wake-loop,
+  // context.paperclipResidentWindowCaptureExhausted === true, still no rotate.
+  it("[BLIND] marks capture exhausted and stops attempting capture after K consecutive fail-closed captures (B7a)", async () => {
+    const K = 3; // spec: K is a small constant (owner-approved default 3).
     const fixture = await seedFixture({
       runtimeConfig: thresholdRuntimeConfig(TEST_RESIDENT_THRESHOLD),
       priorResidentWindowTokens: TEST_RESIDENT_THRESHOLD,
     });
 
     // Each wake fails the capture closed; the over-threshold session keeps running.
-    adapterExecute.mockImplementation(async (input: AdapterInput) => {
-      if (isCaptureCall(input)) {
-        return adapterResult({
-          sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-          sessionDisplayId: previousSessionId,
-          resultJson: { result: "" },
-          summary: "",
-        });
-      }
-      return adapterResult({
-        sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: previousSessionId,
-        summary: "Continued current session after fail-closed capture.",
-      });
-    });
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      isCaptureCall(input)
+        ? adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            resultJson: { result: "" },
+            summary: "",
+          })
+        : adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            summary: "Continued current session after fail-closed capture.",
+          }),
+    );
 
     // Drive K wakes that each fail capture closed.
     for (let i = 0; i < K; i += 1) {
       await runHeartbeat(fixture);
     }
-    const captureCallsThroughK = adapterExecute.mock.calls.filter(
-      (args) => isCaptureCall(args[0] as AdapterInput),
-    ).length;
+    const captureCallsThroughK = countCaptureCalls();
     expect(captureCallsThroughK).toBe(K);
 
     // The (K+1)-th wake on the still-over-threshold session must make no further
-    // capture attempt and must still not rotate.
+    // capture attempt and must still not rotate; exhaustion marker is set.
     const { run } = await runHeartbeat(fixture);
 
-    const totalCaptureCalls = adapterExecute.mock.calls.filter(
-      (args) => isCaptureCall(args[0] as AdapterInput),
-    ).length;
-    expect(totalCaptureCalls).toBe(K);
+    expect(countCaptureCalls()).toBe(K);
     expect(run.usageJson?.sessionRotated).toBe(false);
+    expect(lastMainCallContext().paperclipResidentWindowCaptureExhausted).toBe(true);
+  }, 60_000);
+
+  it("[BLIND] resets the failure count and clears exhaustion when a capture succeeds (B7a reset: capture success)", async () => {
+    const fixture = await seedFixture({
+      runtimeConfig: thresholdRuntimeConfig(TEST_RESIDENT_THRESHOLD),
+      priorResidentWindowTokens: TEST_RESIDENT_THRESHOLD,
+    });
+
+    // First wake: capture fails closed (count becomes >= 1).
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      isCaptureCall(input)
+        ? adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            resultJson: { result: "" },
+            summary: "",
+          })
+        : adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            summary: "Continued current session after fail-closed capture.",
+          }),
+    );
+    await runHeartbeat(fixture);
+    expect(lastMainCallContext().paperclipResidentWindowCaptureFailureCount as number).toBeGreaterThanOrEqual(1);
+
+    // Next wake: capture SUCCEEDS (rotation proceeds with the compact packet).
+    adapterExecute.mockReset();
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      isCaptureCall(input)
+        ? adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            resultJson: { result: fence(validCapturePacket()) },
+            summary: "Captured compact state.",
+          })
+        : adapterResult({
+            sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: freshSessionId,
+            summary: "Rotated into a fresh session.",
+          }),
+    );
+    await runHeartbeat(fixture);
+
+    const ctx = lastMainCallContext();
+    // Counter reset to 0, exhaustion cleared on capture success (spec B7a).
+    expect((ctx.paperclipResidentWindowCaptureFailureCount as number | undefined) ?? 0).toBe(0);
+    expect((ctx.paperclipResidentWindowCaptureExhausted as boolean | undefined) ?? false).toBe(false);
   }, 40_000);
+
+  it("[BLIND] resets the failure count and clears exhaustion when the session id changes (B7a reset: session-id change)", async () => {
+    const K = 3;
+    const fixture = await seedFixture({
+      runtimeConfig: thresholdRuntimeConfig(TEST_RESIDENT_THRESHOLD),
+      priorResidentWindowTokens: TEST_RESIDENT_THRESHOLD,
+    });
+
+    // Accumulate K fail-closed captures on the previous session (=> exhausted).
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      isCaptureCall(input)
+        ? adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            resultJson: { result: "" },
+            summary: "",
+          })
+        : adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            summary: "Continued current session after fail-closed capture.",
+          }),
+    );
+    for (let i = 0; i < K; i += 1) {
+      await runHeartbeat(fixture);
+    }
+    expect(lastMainCallContext().paperclipResidentWindowCaptureExhausted).toBe(true);
+
+    // The session id changes: point the task session + a fresh below-threshold
+    // prior run at a NEW session id. The per-session counter is keyed on the
+    // session, so the new session starts clean (spec B7a reset: session-id change).
+    const newSessionId = "rotated-claude-session";
+    await db
+      .update(agentTaskSessions)
+      .set({
+        sessionDisplayId: newSessionId,
+        sessionParamsJson: { sessionId: newSessionId, cwd: fixture.repoRoot },
+      })
+      .where(eq(agentTaskSessions.agentId, fixture.agentId));
+    await db.insert(heartbeatRuns).values({
+      companyId: fixture.companyId,
+      agentId: fixture.agentId,
+      invocationSource: "automation",
+      status: "succeeded",
+      sessionIdBefore: newSessionId,
+      sessionIdAfter: newSessionId,
+      usageJson: { residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1 },
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    adapterExecute.mockReset();
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      adapterResult({
+        sessionParams: { sessionId: newSessionId, cwd: fixture.repoRoot },
+        sessionDisplayId: newSessionId,
+        summary: "Continued the new session.",
+      }),
+    );
+    await runHeartbeat(fixture);
+
+    const ctx = lastMainCallContext();
+    expect((ctx.paperclipResidentWindowCaptureFailureCount as number | undefined) ?? 0).toBe(0);
+    expect((ctx.paperclipResidentWindowCaptureExhausted as boolean | undefined) ?? false).toBe(false);
+  }, 60_000);
+
+  it("[BLIND] resets the failure count and clears exhaustion when the session is no longer over threshold (B7a reset: below-threshold)", async () => {
+    const K = 3;
+    const fixture = await seedFixture({
+      runtimeConfig: thresholdRuntimeConfig(TEST_RESIDENT_THRESHOLD),
+      priorResidentWindowTokens: TEST_RESIDENT_THRESHOLD,
+    });
+
+    // Accumulate K fail-closed captures on the over-threshold session (=> exhausted).
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      isCaptureCall(input)
+        ? adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            resultJson: { result: "" },
+            summary: "",
+          })
+        : adapterResult({
+            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+            sessionDisplayId: previousSessionId,
+            summary: "Continued current session after fail-closed capture.",
+          }),
+    );
+    for (let i = 0; i < K; i += 1) {
+      await runHeartbeat(fixture);
+    }
+    expect(lastMainCallContext().paperclipResidentWindowCaptureExhausted).toBe(true);
+
+    // The session is no longer over threshold: a fresh below-threshold prior run
+    // becomes the latest for the SAME session id. No rotation is due, so the
+    // per-session counter resets (spec B7a reset: no-longer-over-threshold).
+    await db.insert(heartbeatRuns).values({
+      companyId: fixture.companyId,
+      agentId: fixture.agentId,
+      invocationSource: "automation",
+      status: "succeeded",
+      sessionIdBefore: previousSessionId,
+      sessionIdAfter: previousSessionId,
+      usageJson: { residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1 },
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    adapterExecute.mockReset();
+    adapterExecute.mockImplementation(async (input: AdapterInput) =>
+      adapterResult({
+        sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
+        sessionDisplayId: previousSessionId,
+        summary: "Continued current session below threshold.",
+      }),
+    );
+    const { run } = await runHeartbeat(fixture);
+
+    const ctx = lastMainCallContext();
+    expect(run.usageJson?.sessionRotated).toBe(false);
+    expect((ctx.paperclipResidentWindowCaptureFailureCount as number | undefined) ?? 0).toBe(0);
+    expect((ctx.paperclipResidentWindowCaptureExhausted as boolean | undefined) ?? false).toBe(false);
+  }, 60_000);
 
   // ---- B8: successful rotation => handoff is the fenced compact packet -------
   it("[BLIND] uses the compact working-state packet (fenced handoff-v1) as the rotation handoff (B8)", async () => {
