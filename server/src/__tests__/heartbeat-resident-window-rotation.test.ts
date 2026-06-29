@@ -133,6 +133,37 @@ function adapterResult(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Realistic main (non-capture) adapter result. Spec section 7 "Test-harness
+// realism": main results MUST carry usage/telemetry (a non-zero turnCount AND a
+// residentWindowTokens) so buildRunUsageJson persists a non-null usageJson, and
+// so the new latest run keeps the resident-window signal the engine reads for
+// the next wake (spec section 1: usageTelemetry is spread into usageJson; the
+// engine reads the latest run's usageJson). Mirrors the usage/usageTelemetry
+// shape used by the existing heartbeat-usage-telemetry test.
+function mainResult(
+  args: { sessionId: string; repoRoot: string; residentWindowTokens: number; summary?: string },
+) {
+  return adapterResult({
+    sessionParams: { sessionId: args.sessionId, cwd: args.repoRoot },
+    sessionDisplayId: args.sessionId,
+    summary: args.summary ?? "Main run.",
+    provider: "anthropic",
+    biller: "anthropic",
+    model: "claude-opus-4-8",
+    billingType: "subscription",
+    costUsd: 1.23,
+    usage: { inputTokens: 7724, cachedInputTokens: 7655530, outputTokens: 74235 },
+    usageTelemetry: {
+      turnCount: 12,
+      toolCallCount: 6,
+      toolLessTurnCount: 6,
+      toolLessTurnRatio: 0.5,
+      residentWindowTokens: args.residentWindowTokens,
+      usageFormulaVersion: "claude_local.telemetry.v1",
+    },
+  });
+}
+
 function validCapturePacket(overrides: Record<string, unknown> = {}) {
   return {
     v: 1,
@@ -463,9 +494,10 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
     const calls: AdapterInput[] = [];
     adapterExecute.mockImplementation(async (input: AdapterInput) => {
       calls.push(input);
-      return adapterResult({
-        sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: previousSessionId,
+      return mainResult({
+        sessionId: previousSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Continued current session.",
       });
     });
@@ -498,9 +530,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
           summary: "Captured compact state.",
         });
       }
-      return adapterResult({
-        sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: freshSessionId,
+      // Freshly rotated session starts below threshold (spec section 4 cooldown).
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Rotated into a fresh session.",
       });
     });
@@ -543,9 +577,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
           summary: "Captured compact state.",
         });
       }
-      return adapterResult({
-        sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: freshSessionId,
+      // Freshly rotated session starts below threshold (spec section 4 cooldown).
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Rotated into a fresh session.",
       });
     });
@@ -573,9 +609,10 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
     const calls: AdapterInput[] = [];
     adapterExecute.mockImplementation(async (input: AdapterInput) => {
       calls.push(input);
-      return adapterResult({
-        sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: previousSessionId,
+      return mainResult({
+        sessionId: previousSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Continued current session.",
       });
     });
@@ -611,9 +648,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
           summary: "",
         });
       }
-      return adapterResult({
-        sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: previousSessionId,
+      // Session remains over threshold (spec section 7 test-harness realism).
+      return mainResult({
+        sessionId: previousSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD,
         summary: "Continued current session after fail-closed capture.",
       });
     });
@@ -648,9 +687,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
             resultJson: { result: "" },
             summary: "",
           })
-        : adapterResult({
-            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-            sessionDisplayId: previousSessionId,
+        : mainResult({
+            // Session remains over threshold across wakes (spec section 7).
+            sessionId: previousSessionId,
+            repoRoot: fixture.repoRoot,
+            residentWindowTokens: TEST_RESIDENT_THRESHOLD,
             summary: "Continued current session after fail-closed capture.",
           }),
     );
@@ -684,9 +725,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
             resultJson: { result: "" },
             summary: "",
           })
-        : adapterResult({
-            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-            sessionDisplayId: previousSessionId,
+        : mainResult({
+            // Session remains over threshold across wakes (spec section 7).
+            sessionId: previousSessionId,
+            repoRoot: fixture.repoRoot,
+            residentWindowTokens: TEST_RESIDENT_THRESHOLD,
             summary: "Continued current session after fail-closed capture.",
           }),
     );
@@ -722,9 +765,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
             resultJson: { result: "" },
             summary: "",
           })
-        : adapterResult({
-            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-            sessionDisplayId: previousSessionId,
+        : mainResult({
+            // Session remains over threshold across wakes (spec section 7).
+            sessionId: previousSessionId,
+            repoRoot: fixture.repoRoot,
+            residentWindowTokens: TEST_RESIDENT_THRESHOLD,
             summary: "Continued current session after fail-closed capture.",
           }),
     );
@@ -741,9 +786,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
             resultJson: { result: fence(validCapturePacket()) },
             summary: "Captured compact state.",
           })
-        : adapterResult({
-            sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-            sessionDisplayId: freshSessionId,
+        : mainResult({
+            // Freshly rotated session starts below threshold (spec section 4 cooldown).
+            sessionId: freshSessionId,
+            repoRoot: fixture.repoRoot,
+            residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
             summary: "Rotated into a fresh session.",
           }),
     );
@@ -771,9 +818,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
             resultJson: { result: "" },
             summary: "",
           })
-        : adapterResult({
-            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-            sessionDisplayId: previousSessionId,
+        : mainResult({
+            // Session remains over threshold across wakes (spec section 7).
+            sessionId: previousSessionId,
+            repoRoot: fixture.repoRoot,
+            residentWindowTokens: TEST_RESIDENT_THRESHOLD,
             summary: "Continued current session after fail-closed capture.",
           }),
     );
@@ -809,9 +858,10 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
 
     adapterExecute.mockReset();
     adapterExecute.mockImplementation(async (input: AdapterInput) =>
-      adapterResult({
-        sessionParams: { sessionId: newSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: newSessionId,
+      mainResult({
+        sessionId: newSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Continued the new session.",
       }),
     );
@@ -838,9 +888,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
             resultJson: { result: "" },
             summary: "",
           })
-        : adapterResult({
-            sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-            sessionDisplayId: previousSessionId,
+        : mainResult({
+            // Session remains over threshold across wakes (spec section 7).
+            sessionId: previousSessionId,
+            repoRoot: fixture.repoRoot,
+            residentWindowTokens: TEST_RESIDENT_THRESHOLD,
             summary: "Continued current session after fail-closed capture.",
           }),
     );
@@ -868,9 +920,10 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
 
     adapterExecute.mockReset();
     adapterExecute.mockImplementation(async (input: AdapterInput) =>
-      adapterResult({
-        sessionParams: { sessionId: previousSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: previousSessionId,
+      mainResult({
+        sessionId: previousSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Continued current session below threshold.",
       }),
     );
@@ -899,9 +952,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
           summary: "Captured compact state.",
         });
       }
-      return adapterResult({
-        sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: freshSessionId,
+      // Freshly rotated session starts below threshold (spec section 4 cooldown).
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Rotated into a fresh session.",
       });
     });
@@ -927,9 +982,10 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
     const calls: AdapterInput[] = [];
     adapterExecute.mockImplementation(async (input: AdapterInput) => {
       calls.push(input);
-      return adapterResult({
-        sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: freshSessionId,
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Rotated into a fresh session on runs threshold.",
       });
     });
@@ -951,9 +1007,10 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
     const calls: AdapterInput[] = [];
     adapterExecute.mockImplementation(async (input: AdapterInput) => {
       calls.push(input);
-      return adapterResult({
-        sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: freshSessionId,
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Rotated into a fresh session on raw-input threshold.",
       });
     });
@@ -963,6 +1020,49 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
     const mainCall = calls.find((c) => !isCaptureCall(c))!;
     expect(mainCall.runtime.sessionId).toBeNull();
     expect(run.usageJson?.sessionRotated).toBe(true);
+    expect(isResidentWindowReason(run.usageJson?.sessionRotationReason)).toBe(false);
+  }, 20_000);
+
+  it("[BLIND] still rotates on the existing maxSessionAgeHours trigger (B9)", async () => {
+    // Spec B9: the maxSessionAgeHours trigger remains a live regression surface.
+    // Seed a prior run for this session old enough to exceed the age threshold.
+    const ageHoursThreshold = 24;
+    const fixture = await seedFixture({
+      runtimeConfig: { heartbeat: { sessionCompaction: { maxSessionAgeHours: ageHoursThreshold } } },
+    });
+    // The default seeded prior run is recent; add an older run on the same
+    // session so the session age (latest - oldest) exceeds the threshold.
+    const wellPastThresholdMs = (ageHoursThreshold + 1) * 60 * 60 * 1000;
+    await db.insert(heartbeatRuns).values({
+      companyId: fixture.companyId,
+      agentId: fixture.agentId,
+      invocationSource: "automation",
+      status: "succeeded",
+      sessionIdBefore: previousSessionId,
+      sessionIdAfter: previousSessionId,
+      usageJson: { residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1, turnCount: 5 },
+      startedAt: new Date(Date.now() - wellPastThresholdMs),
+      finishedAt: new Date(Date.now() - wellPastThresholdMs + 500),
+      createdAt: new Date(Date.now() - wellPastThresholdMs),
+      updatedAt: new Date(Date.now() - wellPastThresholdMs + 500),
+    });
+    const calls: AdapterInput[] = [];
+    adapterExecute.mockImplementation(async (input: AdapterInput) => {
+      calls.push(input);
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
+        summary: "Rotated into a fresh session on age threshold.",
+      });
+    });
+
+    const { run } = await runHeartbeat(fixture);
+
+    const mainCall = calls.find((c) => !isCaptureCall(c))!;
+    expect(mainCall.runtime.sessionId).toBeNull();
+    expect(run.usageJson?.sessionRotated).toBe(true);
+    expect(run.usageJson?.sessionRotationReason).toBeTruthy();
     expect(isResidentWindowReason(run.usageJson?.sessionRotationReason)).toBe(false);
   }, 20_000);
 
@@ -990,9 +1090,11 @@ describeEmbeddedPostgres("[BLIND] PB-39 heartbeat resident-window session rotati
           summary: "Captured compact state.",
         });
       }
-      return adapterResult({
-        sessionParams: { sessionId: freshSessionId, cwd: fixture.repoRoot },
-        sessionDisplayId: freshSessionId,
+      // Freshly rotated session starts below threshold (spec section 4 cooldown).
+      return mainResult({
+        sessionId: freshSessionId,
+        repoRoot: fixture.repoRoot,
+        residentWindowTokens: TEST_RESIDENT_THRESHOLD - 1,
         summary: "Rotated into a fresh session.",
       });
     });
