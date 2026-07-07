@@ -10,7 +10,7 @@ Run a **separate throwaway instance** with its own `PAPERCLIP_HOME`, started **f
 Real pitfalls this was validated against:
 1. A wrong-shell command left the env unset and started a **second server on the real DB**. Always confirm the startup banner shows the throwaway `Database` path before proceeding.
 2. `PAPERCLIP_HOME` alone does not force `authenticated` — a hand-written `config.json` `server` section is rejected by schema validation and silently falls back to `local_trusted`. Use the **env overrides** in Step 1 (they win with precedence, `config.ts:165`).
-3. `PAPERCLIP_HOME` does **not** guarantee DB isolation on its own. Startup can still reach a real DB via: an inherited `DATABASE_URL`/`DATABASE_MIGRATION_URL`/`PAPERCLIP_CONFIG` (`runtime-config.ts:189`); a `process.cwd()/.env` or the resolved config's env file loaded at startup (`config.ts:33-44`, `override:false`, and it accepts `export KEY=...`); or an ancestor `.paperclip/config.json` used when `PAPERCLIP_CONFIG` is unset (`paths.ts:28`). Migrations run against the resolved DB **before** the banner prints (`index.ts:316`), so a banner check alone will not save you. This is covered by **Step 0's preflight** (cwd `.env` + ancestor config) plus **Step 1's fresh-home delete** (the throwaway's own env file). Both are mandatory.
+3. `PAPERCLIP_HOME` does **not** guarantee DB isolation on its own. Startup can still reach a real DB via: an inherited `DATABASE_URL`/`DATABASE_MIGRATION_URL`/`PAPERCLIP_CONFIG` (`runtime-config.ts:189`); a `process.cwd()/.env` or the resolved config's env file loaded at startup (`config.ts:33-44`, `override:false`, and it accepts `export KEY=...`); or an ancestor `.paperclip/config.json` used when `PAPERCLIP_CONFIG` is unset (`paths.ts:28`). Migrations run against the resolved DB **before** the banner prints (`index.ts:316`), so a banner check alone will not save you. This is covered by **Step 0's preflight** (cwd `.env` + ancestor config) plus **Step 1's verified fresh-home delete** (the throwaway's own env file; the server start is gated on that delete having actually succeeded). Both are mandatory.
 
 ## What already works (no build required)
 
@@ -28,11 +28,11 @@ If it aborts, follow the printed remediation (blank/move the DB vars in the repo
 
 ## Step 1 — Start a fresh throwaway authenticated instance
 
-One terminal, from the repo root. Env syntax is shell-specific; the first block also **deletes any previous throwaway home** so no stale `.env`/config lingers inside it, and **clears** inherited DB vars.
+One terminal, from the repo root. Env syntax is shell-specific; each block **deletes any previous throwaway home** (so no stale `.env`/config lingers inside it), **clears** inherited DB vars, and **refuses to start the server if the delete failed** — e.g. when a previous throwaway is still running and holds file locks.
 
 **cmd.exe** (`set VAR=value`, no quotes):
 ```bat
-rmdir /s /q "%USERPROFILE%\.paperclip-mu-test" 2>nul
+if exist "%USERPROFILE%\.paperclip-mu-test" rmdir /s /q "%USERPROFILE%\.paperclip-mu-test"
 set DATABASE_URL=
 set DATABASE_MIGRATION_URL=
 set PAPERCLIP_CONFIG=
@@ -40,16 +40,17 @@ set PAPERCLIP_HOME=%USERPROFILE%\.paperclip-mu-test
 set PAPERCLIP_DEPLOYMENT_MODE=authenticated
 set PAPERCLIP_SECRETS_STRICT_MODE=false
 set BETTER_AUTH_SECRET=paperclip-dev-secret
-pnpm dev:server
+if exist "%USERPROFILE%\.paperclip-mu-test" (echo ABORT - stale throwaway home still exists, stop the previous throwaway with Ctrl+C and re-run this block) else (pnpm dev:server)
 ```
 
-**PowerShell**:
+**PowerShell** (single line on purpose — see note below):
 ```powershell
-Remove-Item -Recurse -Force "$env:USERPROFILE\.paperclip-mu-test" -ErrorAction SilentlyContinue
-$env:DATABASE_URL=$null; $env:DATABASE_MIGRATION_URL=$null; $env:PAPERCLIP_CONFIG=$null; $env:PAPERCLIP_HOME="$env:USERPROFILE\.paperclip-mu-test"; $env:PAPERCLIP_DEPLOYMENT_MODE="authenticated"; $env:PAPERCLIP_SECRETS_STRICT_MODE="false"; $env:BETTER_AUTH_SECRET="paperclip-dev-secret"; pnpm dev:server
+if (Test-Path "$env:USERPROFILE\.paperclip-mu-test") { Remove-Item -Recurse -Force "$env:USERPROFILE\.paperclip-mu-test" -ErrorAction Stop }; if (Test-Path "$env:USERPROFILE\.paperclip-mu-test") { throw "ABORT - stale throwaway home still exists (previous throwaway still running?)" }; $env:DATABASE_URL=$null; $env:DATABASE_MIGRATION_URL=$null; $env:PAPERCLIP_CONFIG=$null; $env:PAPERCLIP_HOME="$env:USERPROFILE\.paperclip-mu-test"; $env:PAPERCLIP_DEPLOYMENT_MODE="authenticated"; $env:PAPERCLIP_SECRETS_STRICT_MODE="false"; $env:BETTER_AUTH_SECRET="paperclip-dev-secret"; pnpm dev:server
 ```
 
-Why: `PAPERCLIP_DEPLOYMENT_MODE` forces authenticated (`config.ts:160-165`); with exposure defaulting to `private` and no public URL, `authBaseUrlMode` is `auto` and needs **no** explicit URL (`index.ts:502-514`). `BETTER_AUTH_SECRET` is required in authenticated mode (`auth/better-auth.ts:128`). `PAPERCLIP_SECRETS_STRICT_MODE=false` avoids strict-mode friction. The fresh-home delete removes any stale throwaway env file (pitfall 3).
+Pasted lines keep executing even after an earlier line fails (in both shells), so the delete-failed guard must gate the start command itself: in cmd the final line wraps `pnpm dev:server` in an `if exist` check (an `exit /b` would not stop the remaining pasted lines), and the PowerShell block is one statement list so the `throw`/`-ErrorAction Stop` cancels everything after it, including the start.
+
+Why: `PAPERCLIP_DEPLOYMENT_MODE` forces authenticated (`config.ts:160-165`); with exposure defaulting to `private` and no public URL, `authBaseUrlMode` is `auto` and needs **no** explicit URL (`index.ts:502-514`). `BETTER_AUTH_SECRET` is required in authenticated mode (`auth/better-auth.ts:128`). `PAPERCLIP_SECRETS_STRICT_MODE=false` avoids strict-mode friction. The fresh-home delete removes any stale throwaway env file, and the gated start refuses to run if that delete failed (pitfall 3).
 
 **Verify the banner before touching anything:**
 - `Deploy: authenticated (private)`
@@ -88,6 +89,7 @@ A built-in Playwright multi-user suite exists (`tests/e2e/multi-user-authenticat
 
 ## Troubleshooting (all hit during live validation)
 
+- `ABORT - stale throwaway home still exists` -> a previous throwaway is still running (stop it with Ctrl+C) or something else holds a handle inside `%USERPROFILE%\.paperclip-mu-test` (close terminals/Explorer windows in it), then re-run the whole Step 1 block.
 - `Board mutation requires trusted browser origin` (403) -> add `Origin: http://127.0.0.1:<PORT>` to the request.
 - Instance came up `local_trusted` despite a config file -> use the env overrides in Step 1; a hand-written `server` config section does not apply.
 - `BETTER_AUTH_SECRET ... must be set` -> set the env var (dev value is fine for a private test; Better Auth warns it is low-entropy — acceptable for a throwaway).
