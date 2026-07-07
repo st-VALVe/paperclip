@@ -7,9 +7,10 @@ Goal: exercise the pipeline with several real human users on a private network, 
 
 Run a **separate throwaway instance** with its own `PAPERCLIP_HOME`. Its embedded Postgres lands in a separate data dir on an auto-selected free port, so the running `local_trusted` instance (and its DB) are untouched. **Never switch the running pipeline instance to `authenticated`.**
 
-Two real near-misses this was validated against:
+Real pitfalls this was validated against:
 1. A wrong-shell command left the env unset and started a **second server on the real DB**. Always confirm the startup banner shows the throwaway `Database` path before proceeding.
 2. `PAPERCLIP_HOME` alone does not force `authenticated` — a hand-written `config.json` `server` section is rejected by schema validation and silently falls back to `local_trusted`. Use the **env overrides** below (they win with precedence, `config.ts:165`).
+3. `PAPERCLIP_HOME` does **not** override an inherited `DATABASE_URL` / `DATABASE_MIGRATION_URL` / `PAPERCLIP_CONFIG` — those are read first (`runtime-config.ts:189`) and startup runs migrations against the resolved DB **before** the banner prints, so a banner check alone will not save you. Step 1 clears them explicitly; keep those lines.
 
 ## What already works (no build required)
 
@@ -19,8 +20,11 @@ Covered by ~68 passing server tests (auth/board/invite/authz): modes, membership
 
 From the repo root, in **one terminal**. Env syntax is shell-specific:
 
-**cmd.exe** (note: `set VAR=value`, no quotes):
+**cmd.exe** (note: `set VAR=value`, no quotes; the first three lines **clear** inherited vars):
 ```bat
+set DATABASE_URL=
+set DATABASE_MIGRATION_URL=
+set PAPERCLIP_CONFIG=
 set PAPERCLIP_HOME=%USERPROFILE%\.paperclip-mu-test
 set PAPERCLIP_DEPLOYMENT_MODE=authenticated
 set PAPERCLIP_SECRETS_STRICT_MODE=false
@@ -30,10 +34,10 @@ pnpm dev:server
 
 **PowerShell**:
 ```powershell
-$env:PAPERCLIP_HOME="$env:USERPROFILE\.paperclip-mu-test"; $env:PAPERCLIP_DEPLOYMENT_MODE="authenticated"; $env:PAPERCLIP_SECRETS_STRICT_MODE="false"; $env:BETTER_AUTH_SECRET="paperclip-dev-secret"; pnpm dev:server
+$env:DATABASE_URL=$null; $env:DATABASE_MIGRATION_URL=$null; $env:PAPERCLIP_CONFIG=$null; $env:PAPERCLIP_HOME="$env:USERPROFILE\.paperclip-mu-test"; $env:PAPERCLIP_DEPLOYMENT_MODE="authenticated"; $env:PAPERCLIP_SECRETS_STRICT_MODE="false"; $env:BETTER_AUTH_SECRET="paperclip-dev-secret"; pnpm dev:server
 ```
 
-Why these: `PAPERCLIP_DEPLOYMENT_MODE` forces authenticated (`config.ts:160-165`); with exposure defaulting to `private` and no public URL, `authBaseUrlMode` is `auto` and needs **no** explicit URL (`index.ts:502-514`). `BETTER_AUTH_SECRET` is required in authenticated mode (`auth/better-auth.ts:128`). `PAPERCLIP_SECRETS_STRICT_MODE=false` avoids strict-mode friction on a fresh throwaway.
+Why these: **clearing `DATABASE_URL` / `DATABASE_MIGRATION_URL` / `PAPERCLIP_CONFIG` is mandatory** — `resolveDatabaseTarget` (`packages/db/src/runtime-config.ts:189`) reads `DATABASE_URL` (and `PAPERCLIP_CONFIG` for the config path) **before** `PAPERCLIP_HOME`, and startup runs migrations against the resolved DB before the banner prints. If your shell inherited any of these pointing at the real instance, the throwaway would migrate/touch the real DB. `PAPERCLIP_DEPLOYMENT_MODE` forces authenticated (`config.ts:160-165`); with exposure defaulting to `private` and no public URL, `authBaseUrlMode` is `auto` and needs **no** explicit URL (`index.ts:502-514`). `BETTER_AUTH_SECRET` is required in authenticated mode (`auth/better-auth.ts:128`). `PAPERCLIP_SECRETS_STRICT_MODE=false` avoids strict-mode friction on a fresh throwaway.
 
 **Verify the banner before touching anything:**
 - `Deploy: authenticated (private)`
@@ -59,7 +63,7 @@ Everything below is HTTP against `http://127.0.0.1:<PORT>`. **All board (session
 
 ## Step 4 — Invite the other testers
 
-1. Admin creates an invite: `POST /api/companies/<companyId>/invites` (session + `Origin`), body `{"allowedJoinTypes":"human","membershipRole":"operator"}` (note: `allowedJoinTypes` is a **scalar** `"human"|"agent"|"both"`, not an array). Returns `token` (`pcp_invite_...`).
+1. Admin creates an invite: `POST /api/companies/<companyId>/invites` (session + `Origin`), body `{"allowedJoinTypes":"human","humanRole":"operator"}` (note: `allowedJoinTypes` is a **scalar** `"human"|"agent"|"both"`, not an array; the role field is **`humanRole`** per `packages/shared/src/validators/access.ts:14` — `membershipRole` is silently ignored here). Returns `token` (`pcp_invite_...`).
 2. Tester signs up (`/api/auth/sign-up/email`), then accepts: `POST /api/invites/<token>/accept` (their session + `Origin`), body `{"requestType":"human"}` -> `status:"approved"`, joined.
 
 ## Step 5 — Verify multi-user behaviour
@@ -68,9 +72,9 @@ Everything below is HTTP against `http://127.0.0.1:<PORT>`. **All board (session
 - **Isolation:** before joining, a non-member `GET /api/companies/<companyId>` returns **403** and their `GET /api/companies` returns `[]`; after accepting the invite it returns **200** and the company appears in their list.
 - **RBAC:** unauthenticated `GET /api/companies` returns **403** (authenticated mode enforcing).
 
-## Step 6 — Automated smoke (optional)
+## Step 6 — Automated smoke (optional, requires extra setup)
 
-`pnpm test:e2e:multiuser-authenticated` runs the built-in Playwright multi-user suite (`tests/e2e/multi-user-authenticated.spec.ts`).
+A built-in Playwright multi-user suite exists (`tests/e2e/multi-user-authenticated.spec.ts`), but `pnpm test:e2e:multiuser-authenticated` is **not** a one-liner: its config (`tests/e2e/playwright-multiuser-authenticated.config.ts`) has **no `webServer`** and targets `PAPERCLIP_E2E_PORT` (default **3105**), and the spec expects `PAPERCLIP_HOME` / `PAPERCLIP_E2E_DATA_DIR` plus a valid config. You must first start a throwaway authenticated instance bound to that port with the E2E env set, then run the command. The manual API smoke in Steps 2–5 is the simpler, already-verified path.
 
 ## Troubleshooting (all hit during live validation)
 
