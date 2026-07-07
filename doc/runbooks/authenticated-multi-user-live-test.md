@@ -10,11 +10,21 @@ Run a **separate throwaway instance** with its own `PAPERCLIP_HOME`. Its embedde
 Real pitfalls this was validated against:
 1. A wrong-shell command left the env unset and started a **second server on the real DB**. Always confirm the startup banner shows the throwaway `Database` path before proceeding.
 2. `PAPERCLIP_HOME` alone does not force `authenticated` — a hand-written `config.json` `server` section is rejected by schema validation and silently falls back to `local_trusted`. Use the **env overrides** below (they win with precedence, `config.ts:165`).
-3. `PAPERCLIP_HOME` does **not** override an inherited `DATABASE_URL` / `DATABASE_MIGRATION_URL` / `PAPERCLIP_CONFIG` — those are read first (`runtime-config.ts:189`) and startup runs migrations against the resolved DB **before** the banner prints, so a banner check alone will not save you. Step 1 clears them explicitly; keep those lines.
+3. `PAPERCLIP_HOME` does **not** guarantee DB isolation on its own. Startup can still reach a real DB via three vectors: an inherited `DATABASE_URL`/`DATABASE_MIGRATION_URL`/`PAPERCLIP_CONFIG` (`runtime-config.ts:189`), a `process.cwd()/.env` loaded at startup (`config.ts:38-43`, `override:false` — so it fills a *cleared* var), or an ancestor `.paperclip/config.json` used when `PAPERCLIP_CONFIG` is unset (`paths.ts:26-29`). Migrations run against the resolved DB **before** the banner prints (`index.ts:316-318`), so a banner check alone will not save you. Step 1's env-clears handle the inherited vars; **Step 0's preflight (below) is mandatory** for the `.env` / ancestor-config vectors.
 
 ## What already works (no build required)
 
 Covered by ~68 passing server tests (auth/board/invite/authz): modes, memberships + roles, invites, RBAC, board principal, cross-company isolation, and **company creation grants the creator an active `owner` membership** (`server/src/routes/companies.ts:304`) so `assigneeUserId` works in fresh companies.
+
+## Step 0 — Preflight (mandatory): no external DB source
+
+Run this from the exact directory you will start the server in. It aborts if a repo/ancestor `.env` or `.paperclip/config.json` could route the throwaway at a non-throwaway database (which would be migrated **before** the banner prints — see pitfall 3). It must print `preflight OK`:
+
+```bat
+node -e "const fs=require('fs'),p=require('path');const bad=[];const e=p.resolve('.env');if(fs.existsSync(e)&&/^\s*(DATABASE_URL|DATABASE_MIGRATION_URL)\s*=/m.test(fs.readFileSync(e,'utf8')))bad.push(e+' (has DB vars)');let d=process.cwd();for(;;){const c=p.join(d,'.paperclip','config.json');if(fs.existsSync(c))bad.push(c);const n=p.dirname(d);if(n===d)break;d=n}if(bad.length){console.error('ABORT: could route the throwaway at a non-throwaway DB:\n'+bad.join('\n'));process.exit(1)}console.log('preflight OK')"
+```
+
+If it aborts: either remove/blank the `DATABASE_URL`/`DATABASE_MIGRATION_URL` lines in the offending repo `.env`, or set `PAPERCLIP_CONFIG` explicitly to your throwaway instance's `config.json` (this disables the ancestor-config fallback) **and** point a throwaway `.env` (with blank DB vars) next to it. Do not proceed until this prints `preflight OK`.
 
 ## Step 1 — Start a throwaway authenticated instance
 
