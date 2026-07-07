@@ -18,7 +18,7 @@ Covered by ~68 passing server tests (auth/board/invite/authz): modes, membership
 
 ## Step 0 — Preflight (mandatory): no external DB source
 
-From the exact directory you will start the server in, run the preflight. It aborts if a cwd `.env` sets `DATABASE_URL` / `DATABASE_MIGRATION_URL` / `PAPERCLIP_CONFIG` (including `export KEY=...`), or if any ancestor `.paperclip/config.json` exists — sources the server loads at startup and migrates against **before** the banner. Must print `preflight OK`:
+From the exact directory you will start the server in, run the preflight. It parses a cwd `.env` with the **server's own dotenv** (so `=`, `: ` colon-style, `export`, and quotes all count exactly as startup does) and aborts if it sets `DATABASE_URL` / `DATABASE_MIGRATION_URL` / `PAPERCLIP_CONFIG` to a non-empty value, or if any ancestor `.paperclip/config.json` exists — sources the server loads at startup and migrates against **before** the banner. Must print `preflight OK`:
 
 ```sh
 node scripts/mu-test-db-preflight.mjs
