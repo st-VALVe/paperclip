@@ -16,7 +16,7 @@ Real pitfalls this was validated against:
 
 Covered by ~68 passing server tests (auth/board/invite/authz): modes, memberships + roles, invites, RBAC, board principal, cross-company isolation, and **company creation grants the creator an active `owner` membership** (`server/src/routes/companies.ts:304`) so `assigneeUserId` works in fresh companies.
 
-**The browser UI needs a build.** `pnpm dev:server` serves the **API only** — on a repo with no UI build it logs `UI dist not found; running in API-only mode` and the banner shows `API-only`. Human testers click in a browser, so build the UI once (Step 1). The operator can bootstrap and verify entirely over the API without it, but the testers cannot.
+**The browser UI needs a build.** `pnpm dev:server` serves the **API only** unless `ui/dist` exists — with no UI build it logs `UI dist not found; running in API-only mode`. (The banner `Mode` still shows `static-ui` whenever `serveUi` is on — it reflects the config, not whether the build is present — so use that **log line**, or a `GET /` returning HTML, to tell whether the UI is actually served.) Human testers click in a browser, so build the UI once (Step 1). The operator can bootstrap and verify entirely over the API without it, but the testers cannot.
 
 ## Step 0 — Preflight (mandatory): no external DB source
 
@@ -59,7 +59,7 @@ Why: `PAPERCLIP_DEPLOYMENT_MODE` forces authenticated (`config.ts:160-165`); wit
 - `Auth: ready`
 - `Database  ...\.paperclip-mu-test\...\db (pg:<port != your real 54329>)`
 - `Server listening on <BIND>:<PORT>` (`127.0.0.1` for loopback, `0.0.0.0` with `bind=lan`) — note the PORT (auto-picked; e.g. 3101 if 3100 is taken).
-- `Mode ... static-ui` if you built the UI (below); `API-only` if not.
+- `Mode ... static-ui` (shown whenever `serveUi` is on, even with no UI build — it is **not** proof the UI is served). To confirm the UI is actually served, check the log for `UI dist not found; running in API-only mode` (absent = served) or that `GET /` returns HTML.
 - **No board-claim URL prints on a fresh home** — that only appears if this home previously ran `local_trusted` (which seeds a `local-board` admin). A genuinely fresh authenticated instance has zero admins and bootstraps via Step 2's browser first-admin claim (`bootstrapStatus:"bootstrap_pending"` at `/api/health`).
 
 **For a real LAN/Tailscale test, two env vars are needed** (not just one):
