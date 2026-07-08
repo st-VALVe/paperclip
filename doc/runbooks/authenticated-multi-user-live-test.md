@@ -94,7 +94,7 @@ A **fresh** authenticated instance has no admin. The **first signed-in user to c
 
 ## Step 5 — Verify multi-user behaviour
 
-- **Assignment:** `POST /api/companies/<companyId>/issues` body `{"title":"...","status":"todo","assigneeUserId":"<userId>"}` -> the issue carries `assigneeUserId` (`status` is required; valid values in `ISSUE_STATUSES`).
+- **Assignment:** `POST /api/companies/<companyId>/issues` body `{"title":"...","assigneeUserId":"<userId>"}` -> the issue carries `assigneeUserId`. (`status` is optional — the route defaults it via `applyCreateIssueStatusDefault` (`server/src/routes/issues.ts`); pass one only if you want a specific `ISSUE_STATUSES` value.)
 - **Isolation:** before joining, a non-member `GET /api/companies/<companyId>` returns **403** and their `GET /api/companies` returns `[]`; after accepting the invite it returns **200** and the company appears in their list.
 - **RBAC:** unauthenticated `GET /api/companies` returns **403**; a **viewer** `POST .../issues` returns **403**; an **operator** `POST .../invites` returns **403** (no `users:invite`).
 - **Concurrency:** two members `PATCH /api/issues/<id>` on different issues at the same time both succeed and persist independently (no clobber).
