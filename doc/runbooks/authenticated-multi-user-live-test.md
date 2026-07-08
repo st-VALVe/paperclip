@@ -66,11 +66,11 @@ Why: `PAPERCLIP_DEPLOYMENT_MODE` forces authenticated (`config.ts:160-165`); wit
 - `PAPERCLIP_BIND=lan` (or `tailnet`) so it binds non-loopback (`index.ts:491`).
 - `PAPERCLIP_ALLOWED_HOSTNAMES=<your-LAN-IP>` — otherwise the private-hostname guard rejects every request to that IP with `Hostname '<ip>' is not allowed for this Paperclip instance` (`middleware/private-hostname-guard.ts`; `bind=0.0.0.0` is **not** auto-allowed). Comma-separated for several hosts (`config.ts:216`); equivalently `pnpm paperclipai allowed-hostname <ip>`. cmd: `set PAPERCLIP_BIND=lan` + `set PAPERCLIP_ALLOWED_HOSTNAMES=192.168.1.50`; PowerShell: `$env:PAPERCLIP_BIND="lan"; $env:PAPERCLIP_ALLOWED_HOSTNAMES="192.168.1.50"`. Testers then use `http://<your-LAN-IP>:<PORT>`.
 
-**To give testers a browser UI, build it once** (the API server then serves it as `static-ui` on the same port — no extra process):
+**To give testers a browser UI, build it once — BEFORE the start block above** (the API server then serves it as `static-ui` on the same port, no extra process):
 ```sh
 pnpm --filter @paperclipai/ui build
 ```
-Alternatively run `pnpm dev:ui` in a second terminal (Vite dev server, proxies to the API). Without either, the instance is API-only and testers see nothing in a browser.
+The server only checks for `ui/dist` **at startup**, so building while it is already running has no effect until you restart it (stop with Ctrl+C and re-run the Step 1 block). Alternatively run `pnpm dev:ui` in a second terminal (Vite dev server, proxies to the API). Without either, the instance is API-only and testers see nothing in a browser.
 
 ## Step 2 — Bootstrap the first admin
 
