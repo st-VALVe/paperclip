@@ -8,13 +8,13 @@ Goal: enrol one AI agent in a throwaway `authenticated` company and drive a `hum
 
 - A throwaway `authenticated` + `private` instance per [`authenticated-multi-user-live-test.md`](authenticated-multi-user-live-test.md), with a signed-in first admin and a company (Steps 0–3 there). This runbook adds the agent side.
 - **[CODE]** An agent JWT secret. `createLocalAgentJwt` reads `PAPERCLIP_AGENT_JWT_SECRET`, falling back to `BETTER_AUTH_SECRET` (`server/src/agent-auth-jwt.ts:35`). The multi-user runbook already sets `BETTER_AUTH_SECRET`, so JWT signing works; set `PAPERCLIP_AGENT_JWT_SECRET` explicitly if you want a dedicated key.
-- **[LIVE]** A working adapter on the host for whatever `adapterType` you use (`process` / `claude_local` / `codex`). The agent's actual execution needs real adapter tooling + credentials — this is owner-deploy/live, not something the repo alone provides. Reuse the same adapter setup the existing pipeline uses (e.g. `bin/claude-shim.cmd` for `claude_local`, or `codex`).
+- **[LIVE]** A working adapter on the host for whatever `adapterType` you use. Built-in adapter ids are in `AGENT_ADAPTER_TYPES` (`packages/shared/src/constants.ts`) — e.g. `process`, `claude_local`, `codex_local` (note: the id is `codex_local`, not `codex`). The agent's actual execution needs real adapter tooling + credentials — this is owner-deploy/live, not something the repo alone provides. Reuse the same adapter setup the existing pipeline uses (e.g. `bin/claude-shim.cmd` for `claude_local`, or the `codex` CLI for `codex_local`).
 
 ## What the code guarantees (so you know what to expect)
 
 - **[CODE]** One issue is assignable to a human (`assigneeUserId`) **or** an agent (`assigneeAgentId`) — same schema (`packages/shared/src/validators/issue.ts`).
 - **[CODE]** Agents and humans share one membership + permission model: `getActiveMembership` and `decidePrincipalGrant` treat `principalType` `"agent"` and `"user"` identically (`server/src/services/authorization.ts:419,1308`).
-- **[CODE]** Agent auth is tenant-isolated: the JWT is signed with a per-company key (`deriveCompanySigningKey`, used in both sign and verify) and verification rejects a `companyId` mismatch (`server/src/agent-auth-jwt.ts`); API keys carry `companyId` and middleware blocks cross-company use ("Agent key cannot access another company", `server/src/middleware/auth.ts`).
+- **[CODE]** Agent auth is tenant-isolated: the JWT is signed with a per-company key (`deriveCompanySigningKey`, used in both sign and verify) and verification rejects a `companyId` mismatch (`server/src/agent-auth-jwt.ts`); API keys carry `companyId` (stamped on the actor in `server/src/middleware/auth.ts`), and a cross-company call is rejected with "Agent key cannot access another company" in `server/src/routes/authz.ts:56` and the authorization service (`server/src/services/authorization.ts:1173`).
 - **[CODE]** Assigning to an agent **wakes** it; assigning to a human does **not** — human pickup is manual via the Inbox (`server/src/services/issue-assignment-wakeup.ts`, no wake path for `assigneeUserId`).
 
 ## Step A — Onboard the agent (pick one path)
@@ -27,7 +27,7 @@ Both paths target `http://<HOST>:<PORT>` with an `Origin` header matching the in
 ```json
 { "name": "Test Agent", "adapterType": "process" }
 ```
-`createAgentSchema` requires `name` and `adapterType`; `role` defaults to `"general"`, `adapterConfig` to `{}` (`packages/shared/src/validators/agent.ts:70`). The route is gated by `assertCanCreateAgentsForCompany` → the `agents:create` permission (instance admin qualifies; a plain member needs an explicit grant) (`server/src/routes/agents.ts`).
+`createAgentSchema` requires only `name`; `adapterType` defaults to `process` (`packages/shared/src/adapter-type.ts:8`), `role` defaults to `"general"`, and `adapterConfig` to `{}` (`packages/shared/src/validators/agent.ts:70`). Pass `adapterType` explicitly when you want a specific adapter. The route is gated by `assertCanCreateAgentsForCompany` → the `agents:create` permission (instance admin qualifies; a plain member needs an explicit grant) (`server/src/routes/agents.ts`).
 
 **[CODE]** Then mint an API key for the agent: `POST /api/agents/<agentId>/keys` (board-only, `assertBoard`) → returns the token **once** (`server/src/routes/agents.ts`). The agent authenticates with `Authorization: Bearer <token>`.
 
@@ -41,7 +41,7 @@ Both paths target `http://<HOST>:<PORT>` with an `Origin` header matching the in
 
 ## Step B — Configure the adapter **[LIVE]**
 
-The agent record exists, but it will not do real work until its adapter is configured with host tooling + credentials (`adapterConfig` / `runtimeConfig`). This is the owner-deploy step; it cannot be proven from the repo alone. Reuse the working pipeline adapter setup. For `claude_local`, agents launch via `bin/claude-shim.cmd`; for `codex`, the `codex` CLI. Confirm the agent's `adapterType` matches available tooling.
+The agent record exists, but it will not do real work until its adapter is configured with host tooling + credentials (`adapterConfig` / `runtimeConfig`). This is the owner-deploy step; it cannot be proven from the repo alone. Reuse the working pipeline adapter setup. For `claude_local`, agents launch via `bin/claude-shim.cmd`; for `codex_local`, the `codex` CLI. Confirm the agent's `adapterType` matches available tooling.
 
 ## Step C — Assign an issue to the agent (human → agent)
 
